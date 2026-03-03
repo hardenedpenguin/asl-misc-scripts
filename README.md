@@ -4,19 +4,12 @@ A collection of miscellaneous shell scripts that can be run directly with `sh`.
 
 ## Usage
 
-Run any script with:
+Run directly from GitHub (one-liner, requires curl):
 
 ```sh
-sh script-name.sh
-```
-
-Or make it executable and run:
-
-```sh
-chmod +x script-name.sh
-./script-name.sh
+curl -sSL https://raw.githubusercontent.com/hardenedpenguin/asl-misc-scripts/refs/heads/main/asl-debian-setup.sh | sudo sh
 ```
 
 ## Scripts
 
-- `asl-debian-setup.sh` — Debian setup helper
+- `asl-debian-setup.sh` — Configures the AllStarLink repository on Debian 12/13, then optionally installs ASL3 or an appliance package (VM, PC, or Raspberry Pi)
