@@ -92,14 +92,24 @@ detect_os() {
 
 setup_repo() {
     info "Downloading ${DEB_FILE}..."
-    cd "${TMP_DIR}"
-    if ! wget "${REPO_BASE}/${DEB_FILE}"; then
-        err "Failed to download ${DEB_FILE}"
+    DEB_PATH="${TMP_DIR}/${DEB_FILE}"
+    if command -v curl >/dev/null 2>&1; then
+        if ! curl -sSLf -o "${DEB_PATH}" "${REPO_BASE}/${DEB_FILE}"; then
+            err "Failed to download ${DEB_FILE}"
+            exit 1
+        fi
+    elif command -v wget >/dev/null 2>&1; then
+        if ! wget -q -O "${DEB_PATH}" "${REPO_BASE}/${DEB_FILE}"; then
+            err "Failed to download ${DEB_FILE}"
+            exit 1
+        fi
+    else
+        err "Neither curl nor wget found. Please install one of them."
         exit 1
     fi
 
     info "Installing AllStarLink package repository..."
-    if ! ${SUDO} dpkg -i "${DEB_FILE}"; then
+    if ! ${SUDO} dpkg -i "${DEB_PATH}"; then
         err "dpkg install failed. You may need to run: ${SUDO} apt-get install -f"
         exit 1
     fi
@@ -110,7 +120,7 @@ setup_repo() {
         exit 1
     fi
 
-    rm -f "${TMP_DIR}/${DEB_FILE}"
+    rm -f "${DEB_PATH}"
 
     info "AllStarLink repository setup complete."
 }

@@ -1,9 +1,8 @@
-#!/usr/bin/perl
+#!/usr/bin/env perl
 use strict;
 use warnings;
 use Getopt::Long;
 use File::Temp qw(tempfile);
-use POSIX qw(strftime);
 
 # Script to create a secure GPG key on Debian 13
 # Usage: ./create_gpg_key.pl [--name "Your Name"] [--email "your@email.com"] [--key-type RSA|ED25519] [--expire-days N]
@@ -37,35 +36,45 @@ unless (system('which gpg > /dev/null 2>&1') == 0) {
     die "Error: gpg is not installed. Please install it with: sudo apt-get install gnupg\n";
 }
 
+# Require interactive terminal (fails when piped: curl | perl)
+my $input_fh = \*STDIN;
+unless (-t STDIN) {
+    if (open my $tty, '<', '/dev/tty') {
+        $input_fh = $tty;
+    } else {
+        die "Error: This script requires an interactive terminal.\nRun: curl -sSL <url> -o script.pl && perl script.pl\n";
+    }
+}
+
 # Get user information if not provided
 unless ($name) {
     print "Enter your name (for GPG key): ";
-    $name = <STDIN>;
+    $name = <$input_fh>;
     chomp $name;
     die "Error: Name cannot be empty\n" unless $name;
 }
 
 unless ($email) {
     print "Enter your email address (for GPG key): ";
-    $email = <STDIN>;
+    $email = <$input_fh>;
     chomp $email;
     die "Error: Email cannot be empty\n" unless $email;
 }
 
-# Get passphrase
-print "Enter passphrase for your GPG key (will be hidden): ";
-system('stty -echo');
-my $passphrase = <STDIN>;
-chomp $passphrase;
-system('stty echo');
-print "\n";
+# Get passphrase (stty uses /dev/tty when piped)
+my $read_passphrase = sub {
+    my ($prompt) = @_;
+    print $prompt;
+    system('stty -echo </dev/tty 2>/dev/null');
+    my $line = <$input_fh>;
+    chomp $line if defined $line;
+    system('stty echo </dev/tty 2>/dev/null');
+    print "\n";
+    return $line;
+};
 
-print "Confirm passphrase: ";
-system('stty -echo');
-my $passphrase_confirm = <STDIN>;
-chomp $passphrase_confirm;
-system('stty echo');
-print "\n";
+my $passphrase = $read_passphrase->("Enter passphrase for your GPG key (will be hidden): ");
+my $passphrase_confirm = $read_passphrase->("Confirm passphrase: ");
 
 unless ($passphrase eq $passphrase_confirm) {
     die "Error: Passphrases do not match\n";
@@ -75,8 +84,8 @@ unless (length($passphrase) >= 8) {
     die "Error: Passphrase must be at least 8 characters long\n";
 }
 
-# Create temporary batch file for gpg
-my ($fh, $batch_file) = tempfile('gpg_batch_XXXXXX', SUFFIX => '.txt', TMPDIR => 1, UNLINK => 1);
+# Create temporary batch file for gpg (UNLINK=>0: we unlink after gpg, secure perms)
+my ($fh, $batch_file) = tempfile('gpg_batch_XXXXXX', SUFFIX => '.txt', TMPDIR => 1, UNLINK => 0);
 
 # Generate batch file content based on key type
 if ($key_type =~ /^RSA$/i) {
@@ -109,6 +118,7 @@ Preferences: SHA512 SHA384 SHA256 SHA224 AES256 AES192 AES CAST5 ZLIB BZIP2 ZIP 
 EOF
 
 close $fh;
+chmod 0600, $batch_file;
 
 # Ensure .gnupg directory exists with proper permissions
 my $gnupg_dir = $ENV{HOME} . '/.gnupg';
@@ -119,9 +129,11 @@ chmod 0700, $gnupg_dir;
 
 # Generate the key
 print "\nGenerating GPG key (this may take a few minutes)...\n";
-my $gpg_cmd = "gpg --batch --gen-key $batch_file 2>&1";
-my $output = `$gpg_cmd`;
+my $output = `gpg --batch --gen-key "$batch_file" 2>&1`;
 my $exit_code = $? >> 8;
+
+# Securely remove batch file (contains passphrase) immediately after use
+unlink $batch_file or warn "Warning: Could not remove batch file: $!\n";
 
 if ($exit_code != 0) {
     print STDERR "Error generating GPG key:\n$output\n";

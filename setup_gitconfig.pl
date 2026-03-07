@@ -1,32 +1,55 @@
 #!/usr/bin/env perl
 use strict;
 use warnings;
-use Term::ReadLine;
 
-# Initialize readline for better input handling
-my $term = Term::ReadLine->new('Git Config Setup');
+# Input handle: use /dev/tty when STDIN is piped (e.g. curl | perl)
+my $input_fh = \*STDIN;
+unless (-t STDIN) {
+    if (open my $tty, '<', '/dev/tty') {
+        $input_fh = $tty;
+    } else {
+        die "Error: This script requires an interactive terminal.\nRun: curl -sSL <url> -o script.pl && perl script.pl\n";
+    }
+}
+
+# Try Term::ReadLine for better input; fallback to simple read
+# Pass $input_fh so it works when piped (curl | perl)
+my $term;
+if (eval { require Term::ReadLine; 1 }) {
+    $term = Term::ReadLine->new('Git Config Setup', $input_fh, \*STDOUT);
+}
 
 print "=== Git Configuration Setup ===\n\n";
 print "This script will help you configure your Git settings.\n";
 print "Press Enter to use default values (shown in brackets).\n\n";
 
-# Function to prompt for input with default
 sub prompt {
     my ($question, $default) = @_;
-    my $prompt = $default ? "$question [$default]: " : "$question: ";
-    my $answer = $term->readline($prompt);
-    chomp($answer);
-    return $answer || $default || '';
+    my $prompt_str = $default ? "$question [$default]: " : "$question: ";
+    my $answer;
+    if ($term) {
+        $answer = $term->readline($prompt_str);
+    } else {
+        print $prompt_str;
+        $answer = <$input_fh>;
+    }
+    chomp($answer) if defined $answer;
+    return (defined $answer && $answer ne "") ? $answer : $default || '';
 }
 
-# Function to prompt for yes/no
 sub prompt_yes_no {
     my ($question, $default) = @_;
     $default = $default ? 'y' : 'n';
-    my $prompt = "$question (y/n) [$default]: ";
-    my $answer = $term->readline($prompt);
-    chomp($answer);
-    $answer = lc($answer);
+    my $prompt_str = "$question (y/n) [$default]: ";
+    my $answer;
+    if ($term) {
+        $answer = $term->readline($prompt_str);
+    } else {
+        print $prompt_str;
+        $answer = <$input_fh>;
+    }
+    chomp($answer) if defined $answer;
+    $answer = lc($answer || "");
     return ($answer eq 'y' || $answer eq 'yes' || ($answer eq '' && $default eq 'y'));
 }
 

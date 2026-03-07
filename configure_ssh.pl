@@ -1,4 +1,4 @@
-#!/usr/bin/perl
+#!/usr/bin/env perl
 
 # Script to configure SSH client settings
 # Usage: ./configure_ssh.pl
@@ -18,6 +18,16 @@ my $NC     = "\033[0m";  # No Color
 
 # Enable autoflush for STDOUT
 $| = 1;
+
+# Input handle: use /dev/tty when STDIN is piped (e.g. curl | perl)
+my $input_fh = \*STDIN;
+unless (-t STDIN) {
+    if (open my $tty, '<', '/dev/tty') {
+        $input_fh = $tty;
+    } else {
+        die "${RED}Error: This script requires an interactive terminal.${NC}\nRun: curl -sSL <url> -o script.pl && perl script.pl\n";
+    }
+}
 
 print "${GREEN}=== SSH Configuration Tool ===${NC}\n\n";
 
@@ -147,12 +157,6 @@ sub configure_global_settings {
         $config .= "    ControlMaster auto\n";
         $config .= "    ControlPath ~/.ssh/control-%r@%h:%p\n";
         $config .= "    ControlPersist 10m\n";
-        
-        # Create control directory
-        my $control_dir = File::Spec->catdir($ssh_dir, 'control');
-        unless (-d $control_dir) {
-            make_path($control_dir, { mode => 0700 });
-        }
     }
     
     if (open my $fh, '>>', $config_file) {
@@ -270,11 +274,12 @@ sub configure_jump_host {
 }
 
 # Subroutine to prompt user for input with default value
+# Uses $input_fh (STDIN or /dev/tty when piped)
 sub prompt {
     my ($message, $default) = @_;
     print $message;
-    my $input = <STDIN>;
-    chomp $input;
-    return $input || $default;
+    my $input = <$input_fh>;
+    chomp $input if defined $input;
+    return (defined $input && $input ne "") ? $input : $default;
 }
 

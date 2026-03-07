@@ -1,4 +1,4 @@
-#!/usr/bin/perl
+#!/usr/bin/env perl
 
 # Script to install and configure certbot on Debian
 # Usage: ./setup_certbot.pl
@@ -20,6 +20,13 @@ $| = 1;
 # Check if running as root
 unless ($< == 0) {
     die "${RED}Error: This script must be run as root (use sudo)${NC}\n";
+}
+
+# Reopen STDIN from /dev/tty when piped (e.g. curl | perl) so prompts work
+unless (-t STDIN) {
+    if (!open(STDIN, "<", "/dev/tty")) {
+        die "${RED}Error: This script requires an interactive terminal. Run: curl -sSL <url> -o script.pl && sudo perl script.pl${NC}\n";
+    }
 }
 
 print "${GREEN}=== Certbot Installation and Configuration Tool ===${NC}\n\n";
@@ -84,8 +91,9 @@ sub install_certbot {
     system("apt-get update -qq");
     
     # Check if snapd is available (recommended method)
+    my $snap_available = (system("which snap > /dev/null 2>&1") == 0);
     my $use_snap = 0;
-    if (system("which snap > /dev/null 2>&1") == 0) {
+    if ($snap_available) {
         my $method = prompt("Install via snap (recommended) or apt? [snap/apt] (default: snap): ", "snap");
         $use_snap = 1 if lc($method) eq "snap";
     }
@@ -94,7 +102,7 @@ sub install_certbot {
         print "${BLUE}Installing certbot via snap...${NC}\n";
         
         # Install snapd if not present
-        if (system("which snap > /dev/null 2>&1") != 0) {
+        unless ($snap_available) {
             print "${YELLOW}Installing snapd...${NC}\n";
             system("apt-get install -y snapd");
             system("systemctl enable --now snapd.socket");
@@ -134,7 +142,7 @@ sub install_certbot {
     if ($plugin eq "1") {
         if ($use_snap) {
             system("snap set certbot trust-plugin-with-root=ok");
-            system("snap install certbot-dns-apache");
+            system("snap install certbot-apache");
         } else {
             system("apt-get install -y python3-certbot-apache");
         }
@@ -142,7 +150,7 @@ sub install_certbot {
     } elsif ($plugin eq "2") {
         if ($use_snap) {
             system("snap set certbot trust-plugin-with-root=ok");
-            system("snap install certbot-dns-nginx");
+            system("snap install certbot-nginx");
         } else {
             system("apt-get install -y python3-certbot-nginx");
         }
@@ -166,18 +174,17 @@ sub configure_certbot {
     my $email = prompt("Enter email address for notifications: ", "");
     return unless $email;
     
-    # Additional domains
+    # Build domain list (avoids shell injection)
+    my @domains = ($domain);
     my $add_www = prompt("Include www subdomain? [Y/n]: ", "y");
-    my $domain_args = "-d $domain";
-    $domain_args .= " -d www.$domain" if lc($add_www) eq "y";
+    push @domains, "www.$domain" if lc($add_www) eq "y";
     
-    # Check for additional domains
     my $more = prompt("Add more domains? [y/N]: ", "n");
     if (lc($more) eq "y") {
         while (1) {
             my $extra = prompt("Enter additional domain (or press Enter to finish): ", "");
             last unless $extra;
-            $domain_args .= " -d $extra";
+            push @domains, $extra;
         }
     }
     
@@ -191,33 +198,33 @@ sub configure_certbot {
     
     my $method = prompt("Enter choice [1-5] (default: 1): ", "1");
     
-    my $cmd = "certbot certonly --non-interactive --agree-tos --email $email $domain_args";
+    my @cmd = ("certbot", "certonly", "--non-interactive", "--agree-tos", "--email", $email);
+    for my $d (@domains) {
+        push @cmd, "-d", $d;
+    }
     
     if ($method eq "1") {
-        $cmd .= " --standalone";
+        push @cmd, "--standalone";
     } elsif ($method eq "2") {
         my $webroot = prompt("Enter webroot path (e.g., /var/www/html): ", "/var/www/html");
-        $cmd .= " --webroot -w $webroot";
+        push @cmd, "--webroot", "-w", $webroot;
     } elsif ($method eq "3") {
-        $cmd = "certbot --apache --non-interactive --agree-tos --email $email $domain_args";
+        @cmd = ("certbot", "--apache", "--non-interactive", "--agree-tos", "--email", $email);
+        for my $d (@domains) { push @cmd, "-d", $d; }
     } elsif ($method eq "4") {
-        $cmd = "certbot --nginx --non-interactive --agree-tos --email $email $domain_args";
+        @cmd = ("certbot", "--nginx", "--non-interactive", "--agree-tos", "--email", $email);
+        for my $d (@domains) { push @cmd, "-d", $d; }
     } elsif ($method eq "5") {
-        $cmd .= " --manual --preferred-challenges dns";
+        push @cmd, "--manual", "--preferred-challenges", "dns";
     }
     
-    # Add redirect option for Apache/Nginx
     if ($method eq "3" || $method eq "4") {
         my $redirect = prompt("Redirect HTTP to HTTPS? [Y/n]: ", "y");
-        if (lc($redirect) eq "y") {
-            $cmd .= " --redirect";
-        } else {
-            $cmd .= " --no-redirect";
-        }
+        push @cmd, (lc($redirect) eq "y") ? "--redirect" : "--no-redirect";
     }
     
-    print "\n${BLUE}Executing: $cmd${NC}\n\n";
-    my $result = system($cmd);
+    print "\n${BLUE}Executing: certbot " . join(" ", map { /\s/ ? "'$_'" : $_ } @cmd) . "${NC}\n\n";
+    my $result = system(@cmd);
     
     if ($result == 0) {
         print "\n${GREEN}✓ Certificate obtained successfully!${NC}\n";
@@ -379,10 +386,10 @@ sub revoke_certificate {
     
     my $delete = prompt("Also delete certificate files? [Y/n]: ", "y");
     
-    my $cmd = "certbot revoke --cert-name $cert_name";
-    $cmd .= " --delete-after-revoke" if lc($delete) eq "y";
+    my @cmd = ("certbot", "revoke", "--cert-name", $cert_name);
+    push @cmd, "--delete-after-revoke" if lc($delete) eq "y";
     
-    system($cmd);
+    system(@cmd);
     
     if ($? == 0) {
         print "\n${GREEN}✓ Certificate revoked successfully!${NC}\n";
@@ -417,11 +424,16 @@ sub complete_setup {
 }
 
 # Subroutine to prompt user for input with default value
+# Uses /dev/tty when STDIN is piped (e.g. curl | perl)
 sub prompt {
     my ($message, $default) = @_;
+    my $fh = (-t STDIN) ? \*STDIN : do {
+        open my $t, "<", "/dev/tty" or die "${RED}Cannot read from terminal. Run interactively.${NC}\n";
+        $t;
+    };
     print $message;
-    my $input = <STDIN>;
-    chomp $input;
-    return $input || $default;
+    my $input = <$fh>;
+    chomp $input if defined $input;
+    return (defined $input && $input ne "") ? $input : $default;
 }
 

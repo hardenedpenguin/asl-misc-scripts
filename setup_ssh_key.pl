@@ -1,4 +1,4 @@
-#!/usr/bin/perl
+#!/usr/bin/env perl
 
 # Script to generate a secure SSH key and copy it to a remote system
 # Usage: ./setup_ssh_key.pl
@@ -6,7 +6,6 @@
 use strict;
 use warnings;
 use File::Spec;
-use File::Basename;
 
 # Color codes for output
 my $GREEN  = "\033[0;32m";
@@ -16,6 +15,12 @@ my $NC     = "\033[0m";  # No Color
 
 # Enable autoflush for STDOUT
 $| = 1;
+
+# Use /dev/tty when STDIN is piped (e.g. curl | perl)
+my $input_fh = (-t STDIN) ? \*STDIN : do {
+    open my $t, '<', '/dev/tty' or die "${RED}Error: Interactive terminal required. Run: curl -sSL <url> -o script.pl && perl script.pl${NC}\n";
+    $t;
+};
 
 print "${GREEN}=== SSH Key Generation and Setup ===${NC}\n\n";
 
@@ -143,18 +148,17 @@ print "\n${GREEN}=== Setup Complete ===${NC}\n";
 sub prompt {
     my ($message, $default) = @_;
     print $message;
-    my $input = <STDIN>;
-    chomp $input;
-    return $input || $default;
+    my $input = <$input_fh>;
+    chomp $input if defined $input;
+    return (defined $input && $input ne "") ? $input : $default;
 }
 
 # Subroutine to expand tilde (~) in paths
 sub expand_tilde {
     my ($path) = @_;
-    if ($path =~ s/^~//) {
-        my $home = $ENV{HOME} || (getpwuid($<))[7];
-        $path = File::Spec->catfile($home, $path);
-    }
+    return $path unless $path =~ /^~/;
+    my $home = $ENV{HOME} || (getpwuid($<))[7];
+    $path =~ s/^~/$home/;
     return $path;
 }
 
