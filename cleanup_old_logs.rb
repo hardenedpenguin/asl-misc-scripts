@@ -11,7 +11,8 @@ AGE_DAYS = 3
 cutoff = Time.now - (AGE_DAYS * 24 * 60 * 60)
 
 deleted = 0
-skipped = 0
+kept_recent = 0 # regular files, still within retention window
+ignored = 0     # directories and non-regular files (not candidates for deletion)
 errors = 0
 
 Find.find(LOG_ROOT) do |path|
@@ -20,7 +21,7 @@ Find.find(LOG_ROOT) do |path|
 
     # Skip directories and non-regular files (symlinks, sockets, etc.)
     if stat.directory? || !stat.file?
-      skipped += 1
+      ignored += 1
       next
     end
 
@@ -28,7 +29,7 @@ Find.find(LOG_ROOT) do |path|
       File.delete(path)
       deleted += 1
     else
-      skipped += 1
+      kept_recent += 1
     end
   rescue Errno::EACCES, Errno::EPERM, Errno::ENOENT => e
     warn "Skipping #{path}: #{e.class} #{e.message}"
@@ -37,5 +38,6 @@ Find.find(LOG_ROOT) do |path|
 end
 
 puts "Deleted: #{deleted}"
-puts "Skipped: #{skipped}"
+puts "Kept (recent files): #{kept_recent}"
+puts "Ignored (dirs/special): #{ignored}"
 puts "Errors: #{errors}"

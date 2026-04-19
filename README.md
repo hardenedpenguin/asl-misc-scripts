@@ -53,3 +53,11 @@ curl -sSL https://raw.githubusercontent.com/hardenedpenguin/asl-misc-scripts/ref
 ```
 
 Configure SSH client (host entries, keep-alive, jump hosts, agent forwarding).
+
+### cleanup_old_logs.rb
+
+```sh
+curl -sSL https://raw.githubusercontent.com/hardenedpenguin/asl-misc-scripts/refs/heads/main/cleanup_old_logs.rb | sudo ruby
+```
+
+Deletes **regular files** under `/var/log` whose modification time is older than three days. Directories, symlinks, and other non-file entries are left alone. Run with `sudo` when you need permission to remove protected logs. Intended for periodic maintenance (for example from cron), not for interactive confirmation.

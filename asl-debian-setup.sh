@@ -126,7 +126,13 @@ setup_repo() {
 }
 
 prompt_install() {
-    if [ ! -t 0 ]; then
+    # Piping the script (e.g. curl ... | sudo sh) leaves stdin as the pipe, not a
+    # TTY, so read the menu choice from the controlling terminal when possible.
+    if [ -t 0 ]; then
+        READ_SOURCE=""
+    elif [ -r /dev/tty ]; then
+        READ_SOURCE="/dev/tty"
+    else
         info "Run manually to install: ${SUDO} apt install asl3"
         return
     fi
@@ -142,7 +148,11 @@ prompt_install() {
     printf '\n'
     printf 'Choice [1-5] (default 5): '
 
-    read -r choice
+    if [ -n "${READ_SOURCE}" ]; then
+        read -r choice < "${READ_SOURCE}"
+    else
+        read -r choice
+    fi
     choice="${choice:-}"
 
     case "${choice}" in
