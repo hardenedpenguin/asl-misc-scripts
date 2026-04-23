@@ -17,8 +17,10 @@
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
 # Detects Debian 12/13, configures the AllStarLink package repository,
-# and optionally installs ASL3 or an appliance package (asl3-appliance,
-# asl3-appliance-pc, asl3-appliance-pi).
+# and optionally installs packages from that repo. On Debian 13 (Trixie)
+# the repo publishes asl3 plus asl3-appliance variants; on Debian 12
+# (Bookworm) the repo publishes asl3 and asl3-pi-appliance (not the other
+# appliance metapackages).
 #
 
 set -e
@@ -133,20 +135,36 @@ prompt_install() {
     elif [ -r /dev/tty ]; then
         READ_SOURCE="/dev/tty"
     else
-        info "Run manually to install: ${SUDO} apt install asl3"
+        if [ "${VERSION_MAJOR}" = "12" ]; then
+            info "Run manually to install (Bookworm): ${SUDO} apt install asl3"
+            info "  or Pi appliance: ${SUDO} apt install asl3-pi-appliance"
+        else
+            info "Run manually to install: ${SUDO} apt install asl3"
+        fi
         return
     fi
 
     printf '\n'
     info "What would you like to install?"
     printf '\n'
-    printf '  1) asl3              - Standard ASL3 (any platform)\n'
-    printf '  2) asl3-appliance    - Appliance for VMs/VPS/generic hardware\n'
-    printf '  3) asl3-appliance-pc - Appliance for PC hardware (mDNS, swap management)\n'
-    printf '  4) asl3-appliance-pi - Appliance for Raspberry Pi\n'
-    printf '  5) Skip              - Do not install now\n'
-    printf '\n'
-    printf 'Choice [1-5] (default 5): '
+
+    if [ "${VERSION_MAJOR}" = "12" ]; then
+        warn "Debian 12 (Bookworm): VM/PC appliance metapackages are on Debian 13 (Trixie) only."
+        printf '\n'
+        printf '  1) asl3              - Standard ASL3 (any platform)\n'
+        printf '  2) asl3-pi-appliance - Appliance for Raspberry Pi\n'
+        printf '  3) Skip              - Do not install now\n'
+        printf '\n'
+        printf 'Choice [1-3] (default 3): '
+    else
+        printf '  1) asl3              - Standard ASL3 (any platform)\n'
+        printf '  2) asl3-appliance    - Appliance for VMs/VPS/generic hardware\n'
+        printf '  3) asl3-appliance-pc - Appliance for PC hardware (mDNS, swap management)\n'
+        printf '  4) asl3-appliance-pi - Appliance for Raspberry Pi\n'
+        printf '  5) Skip              - Do not install now\n'
+        printf '\n'
+        printf 'Choice [1-5] (default 5): '
+    fi
 
     if [ -n "${READ_SOURCE}" ]; then
         read -r choice < "${READ_SOURCE}"
@@ -155,14 +173,23 @@ prompt_install() {
     fi
     choice="${choice:-}"
 
-    case "${choice}" in
-        1) PKG="asl3" ;;
-        2) PKG="asl3-appliance" ;;
-        3) PKG="asl3-appliance-pc" ;;
-        4) PKG="asl3-appliance-pi" ;;
-        5|"") return ;;
-        *) warn "Invalid choice. Skipping install."; return ;;
-    esac
+    if [ "${VERSION_MAJOR}" = "12" ]; then
+        case "${choice}" in
+            1) PKG="asl3" ;;
+            2) PKG="asl3-pi-appliance" ;;
+            3|"") return ;;
+            *) warn "Invalid choice. Skipping install."; return ;;
+        esac
+    else
+        case "${choice}" in
+            1) PKG="asl3" ;;
+            2) PKG="asl3-appliance" ;;
+            3) PKG="asl3-appliance-pc" ;;
+            4) PKG="asl3-appliance-pi" ;;
+            5|"") return ;;
+            *) warn "Invalid choice. Skipping install."; return ;;
+        esac
+    fi
 
     info "Installing ${PKG}..."
     if ${SUDO} apt-get install -y "${PKG}"; then
