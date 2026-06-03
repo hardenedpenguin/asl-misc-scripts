@@ -2,6 +2,12 @@
 
 Lightweight, copy-pasteable scripts for AllStarLink admins and operators. Setup, provisioning, and maintenance tasks that run anywhere with `curl | interpreter`—no clone required. Shell, Ruby, Perl, and more.
 
+## License
+
+All scripts and other code in this repository are free software distributed under the **GNU General Public License version 2 or later** (GPL-2.0-or-later). You may copy, redistribute, and modify them under the terms of the GPL. The full license text is in [LICENSE](LICENSE).
+
+Copyright © 2026 Jory A. Pratt, W5GLE
+
 ## Scripts
 
 Run directly from GitHub with curl. Copy the line for the script you need.
