@@ -1,0 +1,209 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# setup_asl3_gps.rb - Interactive ASL3 GPSD, shared GPS, and APRS setup
+#
+# gpsd owns the USB receiver (saytime_weather_rb, SkywarnPlus-NG, cgps, etc.).
+# app_gps cannot talk to gpsd directly; a systemd bridge replays NMEA to /dev/rptgps.
+
+require 'fileutils'
+
+GPSD_NMEA_BRIDGE_UNIT = '/etc/systemd/system/gpsd-nmea-bridge.service'
+RPT_GPS_PTY = '/dev/rptgps'
+DEFAULT_GPS_BAUD = 115_200
+
+def calculate_aprs_passcode(callsign)
+  call = callsign.split('-', 2).first.upcase
+  code = 0x73e2
+  call.each_char.with_index { |ch, i| code ^= ch.ord << (i.even? ? 8 : 0) }
+  (code & 0x7fff).to_s
+end
+
+def beacon_comment(user_comment, rf_freq, rf_tone)
+  return user_comment if rf_freq.empty?
+
+  parts = ["#{rf_freq} MHz"]
+  unless rf_tone.empty? || rf_tone == '0' || rf_tone == '0.0'
+    parts << "T#{rf_tone}"
+  end
+  parts << user_comment unless user_comment.empty?
+  parts.join(' ')
+end
+
+def enable_app_gps!(modules_conf)
+  return unless File.exist?(modules_conf)
+
+  content = File.read(modules_conf)
+  return if content.match?(/^load\s*=\s*app_gps\.so/i)
+
+  updated = content.gsub(/^noload\s*[=:>]+\s*app_gps\.so.*$/i, 'load = app_gps.so                     ; GPS Interface')
+  return if updated == content
+
+  FileUtils.cp(modules_conf, "#{modules_conf}.bak")
+  File.write(modules_conf, updated)
+  puts "[OK] Enabled app_gps.so in #{modules_conf}"
+end
+
+def install_gpsd_nmea_bridge!
+  unit = <<~UNIT
+    [Unit]
+    Description=Replay gpsd NMEA to #{RPT_GPS_PTY} for app_gps
+    Documentation=man:gpspipe(1) man:socat(1)
+    After=gpsd.service
+    Requires=gpsd.service
+    PartOf=gpsd.service
+
+    [Service]
+    Type=simple
+    Restart=on-failure
+    RestartSec=5
+    ExecStartPre=-/bin/rm -f #{RPT_GPS_PTY}
+    ExecStart=/bin/sh -c 'exec /usr/bin/gpspipe -r | /usr/bin/socat - PTY,link=#{RPT_GPS_PTY},raw,echo=0,group=dialout,mode=660,waitslave'
+
+    [Install]
+    WantedBy=multi-user.target
+  UNIT
+
+  File.write(GPSD_NMEA_BRIDGE_UNIT, unit)
+  system('systemctl daemon-reload')
+  system('systemctl enable gpsd-nmea-bridge.service')
+  system('systemctl restart gpsd-nmea-bridge.service')
+  puts "[OK] Installed gpsd NMEA bridge -> #{RPT_GPS_PTY}"
+end
+
+def ensure_asterisk_dialout!
+  return unless File.exist?('/etc/passwd')
+
+  dialout = File.read('/etc/group').lines.find { |l| l.start_with?('dialout:') }
+  return unless dialout
+
+  members = dialout.split(':').fetch(3, '').split(',')
+  return if members.include?('asterisk')
+
+  system('usermod -aG dialout asterisk')
+  puts '[OK] Added user asterisk to group dialout (for APRS GPS PTY)'
+end
+
+def hint_saytime_gpsd!
+  weather_ini = '/etc/asterisk/local/weather.ini'
+  return unless File.exist?(weather_ini)
+
+  content = File.read(weather_ini)
+  return if content.include?('location_source')
+
+  puts "\nNote: saytime_weather_rb: add to #{weather_ini} under [weather] for GPS location:"
+  puts '    location_source = gps'
+  puts '    gpsd_host = 127.0.0.1'
+  puts '    gpsd_port = 2947'
+end
+
+abort 'ERROR: This script must be run as root (sudo).' if Process.uid != 0
+
+puts '===================================================='
+puts '   ASL3 INTERACTIVE GPSD & APRS CONFIGURATION TOOL  '
+puts '===================================================='
+puts ''
+
+print 'Enter your FCC Callsign (e.g., W5GLE): '
+base_callsign = $stdin.gets.chomp.strip.upcase
+abort 'ERROR: Callsign cannot be blank.' if base_callsign.empty?
+
+aprs_passcode = calculate_aprs_passcode(base_callsign)
+puts "APRS passcode for #{base_callsign}: #{aprs_passcode}"
+
+print 'Enter APRS SSID suffix [default: 10]: '
+ssid = $stdin.gets.chomp.strip
+ssid = '10' if ssid.empty?
+full_callsign = "#{base_callsign}-#{ssid}"
+
+print 'Enter USB GPS serial device for gpsd [default: /dev/ttyACM0]: '
+gps_device = $stdin.gets.chomp.strip
+gps_device = '/dev/ttyACM0' if gps_device.empty?
+
+print 'Enter node RF frequency in MHz (e.g., 443.075): '
+rf_freq = $stdin.gets.chomp.strip
+abort 'ERROR: RF frequency is required for the beacon comment.' if rf_freq.empty?
+
+print 'Enter CTCSS tone in Hz (e.g., 103.5, or 0.0 for none): '
+rf_tone = $stdin.gets.chomp.strip
+rf_tone = '0.0' if rf_tone.empty?
+
+print 'Enter short map beacon comment [default: ASL3 Node - Alvin, TX]: '
+comment = $stdin.gets.chomp.strip
+comment = 'ASL3 Node - Alvin, TX' if comment.empty?
+map_comment = beacon_comment(comment, rf_freq, rf_tone)
+
+puts "\n--- System update & package installation ---"
+unless system('apt-get update && apt-get install -y gpsd gpsd-clients socat')
+  abort 'ERROR: Package installation failed.'
+end
+
+puts "\n--- Writing /etc/default/gpsd ---"
+gpsd_config = <<~GPSD
+  # /etc/default/gpsd - written by setup_asl3_gps.rb
+  START_DAEMON="true"
+  USBAUTO="false"
+  DEVICES="#{gps_device}"
+  # No -b: allow gpsd to use native u-blox binary (readonly blocks satellite config).
+  GPSD_OPTIONS="-n -s #{DEFAULT_GPS_BAUD}"
+  OPTIONS=""
+GPSD
+
+File.write('/etc/default/gpsd', gpsd_config)
+system('systemctl enable gpsd.socket gpsd.service 2>/dev/null')
+system('systemctl restart gpsd.service')
+puts '[OK] gpsd enabled (shared GPS on localhost:2947).'
+
+puts "\n--- APRS NMEA bridge (gpsd -> app_gps) ---"
+ensure_asterisk_dialout!
+install_gpsd_nmea_bridge!
+
+puts "\n--- Writing /etc/asterisk/gps.conf ---"
+asterisk_gps_config = <<~ASTERISK
+  ; /etc/asterisk/gps.conf - written by setup_asl3_gps.rb
+  ; Position NMEA comes from gpsd via #{RPT_GPS_PTY} (gpsd-nmea-bridge.service).
+
+  [general]
+  call = #{full_callsign}
+  password = #{aprs_passcode}
+  server = rotate.aprs2.net
+  port = 14580
+  interval = 60
+  icon = n
+
+  comport = #{RPT_GPS_PTY}
+  baudrate = #{DEFAULT_GPS_BAUD}
+
+  power = 4
+  height = 4
+  gain = 6
+  comment = #{map_comment}
+ASTERISK
+
+gps_conf = '/etc/asterisk/gps.conf'
+if File.exist?(gps_conf)
+  FileUtils.cp(gps_conf, "#{gps_conf}.bak")
+  puts 'Note: Existing gps.conf backed up to gps.conf.bak'
+end
+File.write(gps_conf, asterisk_gps_config)
+puts '[OK] /etc/asterisk/gps.conf written.'
+
+enable_app_gps!('/etc/asterisk/modules.conf')
+
+puts "\n--- Restarting Asterisk ---"
+system('systemctl restart asterisk')
+
+hint_saytime_gpsd!
+
+puts "\n===================================================="
+puts 'Configuration complete!'
+puts '===================================================='
+puts 'Shared GPS: gpsd on 127.0.0.1:2947 (saytime_weather_rb, SkywarnPlus-NG, cgps)'
+puts "APRS: app_gps reads NMEA from #{RPT_GPS_PTY} (gpsd-nmea-bridge.service)"
+puts ''
+puts '1. Check gpsd: cgps -s   (or gpsmon)'
+puts "2. Check bridge: ls -l #{RPT_GPS_PTY}"
+puts '3. Asterisk CLI: gps show status'
+puts "4. Map: https://aprs.fi/#!call=#{full_callsign}"
+puts '   (Allow a few minutes after satellite lock.)'
+puts '===================================================='

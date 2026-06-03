@@ -14,6 +14,24 @@ curl -sSL https://raw.githubusercontent.com/hardenedpenguin/asl-misc-scripts/ref
 
 Configures the AllStarLink repository on Debian 12/13, then optionally installs ASL3 or an appliance package (VM, PC, or Raspberry Pi).
 
+### setup-asl3-gps.rb
+
+```sh
+curl -sSL https://raw.githubusercontent.com/hardenedpenguin/asl-misc-scripts/refs/heads/main/setup-asl3-gps.rb | sudo ruby
+```
+
+Interactive setup for **gpsd**, shared GPS on `127.0.0.1:2947`, and **APRS** via `app_gps` on an ASL3 node. gpsd owns the USB receiver (for saytime, SkywarnPlus, `cgps`, and similar clients). A `gpsd-nmea-bridge` systemd unit replays NMEA to `/dev/rptgps` because `app_gps` only reads a serial-style stream.
+
+The script installs `gpsd`, `gpsd-clients`, and `socat`; writes `/etc/default/gpsd` and `/etc/asterisk/gps.conf` (APRS node icon `/n`, passcode from callsign); enables `app_gps.so` in `modules.conf`; and restarts gpsd and Asterisk. Run as root and answer prompts for callsign, SSID, USB device (`/dev/ttyACM0` default), RF frequency, tone, and beacon comment.
+
+From a clone:
+
+```sh
+git clone https://github.com/hardenedpenguin/asl-misc-scripts.git
+cd asl-misc-scripts
+sudo ./setup-asl3-gps.rb
+```
+
 ### setup_ssh_key.pl
 
 ```sh
