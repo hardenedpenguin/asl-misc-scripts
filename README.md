@@ -30,14 +30,6 @@ Interactive setup for **gpsd**, shared GPS on `127.0.0.1:2947`, and **APRS** via
 
 The script installs `gpsd`, `gpsd-clients`, and `socat`; writes `/etc/default/gpsd` and `/etc/asterisk/gps.conf` (APRS node icon `/n`, passcode from callsign); enables `app_gps.so` in `modules.conf`; and restarts gpsd and Asterisk. Run as root and answer prompts for callsign, SSID, USB device (`/dev/ttyACM0` default), RF frequency, tone, and beacon comment.
 
-From a clone:
-
-```sh
-git clone https://github.com/hardenedpenguin/asl-misc-scripts.git
-cd asl-misc-scripts
-sudo ./setup-asl3-gps.rb
-```
-
 ### setup_ssh_key.pl
 
 ```sh
