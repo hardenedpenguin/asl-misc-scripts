@@ -28,7 +28,7 @@ curl -sSL https://raw.githubusercontent.com/hardenedpenguin/asl-misc-scripts/ref
 
 Interactive setup for **gpsd**, shared GPS on `127.0.0.1:2947`, and **APRS** via `app_gps` on an ASL3 node. gpsd owns the USB receiver (for saytime, SkywarnPlus, `cgps`, and similar clients). A `gpsd-nmea-bridge` systemd unit replays NMEA to `/dev/rptgps` because `app_gps` only reads a serial-style stream.
 
-The script installs `gpsd`, `gpsd-clients`, and `socat`; writes `/etc/default/gpsd` and `/etc/asterisk/gps.conf` (APRS node icon `/n`, passcode from callsign); enables `app_gps.so` in `modules.conf`; and restarts gpsd and Asterisk. Run as root and answer prompts for callsign, SSID, USB device (`/dev/ttyACM0` default), RF frequency, tone, and beacon comment.
+The script installs `gpsd`, `gpsd-clients`, and `socat`; writes `/etc/default/gpsd` and `/etc/asterisk/gps.conf` (APRS passcode from callsign); enables `app_gps.so` in `modules.conf`; and restarts gpsd and Asterisk. Defaults target **Shari PiHat-class** low-power Pi nodes (~5W HT, rubber duck, omni): 180s beacon interval, car icon (`>`), and PHG power/height/gain of 2/1/1. Run as root and answer prompts for callsign, SSID, USB device (`/dev/ttyACM0` default), RF frequency, tone, beacon comment, and interval.
 
 ### setup_ssh_key.pl
 

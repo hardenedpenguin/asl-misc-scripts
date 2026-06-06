@@ -26,7 +26,41 @@ require 'fileutils'
 
 GPSD_NMEA_BRIDGE_UNIT = '/etc/systemd/system/gpsd-nmea-bridge.service'
 RPT_GPS_PTY = '/dev/rptgps'
-DEFAULT_GPS_BAUD = 115_200
+GPSD_USB_BAUD = 115_200
+APP_GPS_BAUD = 4800 # app_gps iospeed; PTY bridge NMEA (not the USB receiver rate)
+
+# APRS defaults for Shari PiHat-class nodes (~5W HT, rubber duck, mobile/low HAAT).
+# PHG digits map to APRS tables: power=sqrt(W), height=log2(HAAT/10 ft), gain=dBi.
+DEFAULT_APRS_INTERVAL = 180 # seconds; easier on Pi CPU and APRS-IS than 60s
+DEFAULT_APRS_ICON = '>'       # primary table: small car (typical mobile GPS node)
+DEFAULT_APRS_POWER = 2        # 4W (closest PHG step for ~3-5W radios)
+DEFAULT_APRS_HEIGHT = 1       # ~20 ft HAAT
+DEFAULT_APRS_GAIN = 1         # 1 dBi (rubber duck / short antenna)
+DEFAULT_APRS_DIR = 0          # omni
+
+def interactive_input
+  return $stdin if $stdin.tty?
+
+  File.open('/dev/tty', 'r')
+rescue Errno::ENOENT, Errno::EACCES, Errno::EPERM
+  abort <<~MSG.strip
+    ERROR: Interactive terminal required.
+    Run from a TTY: curl -sSL https://raw.githubusercontent.com/hardenedpenguin/asl-misc-scripts/refs/heads/main/setup-asl3-gps.rb | sudo ruby
+  MSG
+end
+
+def ask(input, prompt, default: nil)
+  if default
+    print "#{prompt} [default: #{default}]: "
+  else
+    print "#{prompt}: "
+  end
+  line = input.gets
+  abort 'ERROR: Input interrupted.' if line.nil?
+
+  value = line.chomp.strip
+  value.empty? && !default.nil? ? default : value
+end
 
 def calculate_aprs_passcode(callsign)
   call = callsign.split('-', 2).first.upcase
@@ -71,7 +105,7 @@ def install_gpsd_nmea_bridge!
 
     [Service]
     Type=simple
-    Restart=on-failure
+    Restart=always
     RestartSec=5
     ExecStartPre=-/bin/rm -f #{RPT_GPS_PTY}
     ExecStart=/bin/sh -c 'exec /usr/bin/gpspipe -r | /usr/bin/socat - PTY,link=#{RPT_GPS_PTY},raw,echo=0,group=dialout,mode=660,waitslave'
@@ -85,6 +119,28 @@ def install_gpsd_nmea_bridge!
   system('systemctl enable gpsd-nmea-bridge.service')
   system('systemctl restart gpsd-nmea-bridge.service')
   puts "[OK] Installed gpsd NMEA bridge -> #{RPT_GPS_PTY}"
+end
+
+def install_asterisk_after_gps_bridge!
+  dir = '/etc/systemd/system/asterisk.service.d'
+  dropin = File.join(dir, 'gps-bridge.conf')
+  FileUtils.mkdir_p(dir)
+  File.write(dropin, <<~DROPIN)
+    [Unit]
+    After=gpsd-nmea-bridge.service
+    Wants=gpsd-nmea-bridge.service
+  DROPIN
+  system('systemctl daemon-reload')
+  puts '[OK] Asterisk will start after gpsd NMEA bridge on boot.'
+end
+
+def wait_for_rptgps!(timeout_sec: 15)
+  timeout_sec.times do
+    return if File.exist?(RPT_GPS_PTY)
+
+    sleep 1
+  end
+  abort "ERROR: #{RPT_GPS_PTY} did not appear; check: systemctl status gpsd-nmea-bridge.service"
 end
 
 def ensure_asterisk_dialout!
@@ -115,42 +171,41 @@ end
 
 abort 'ERROR: This script must be run as root (sudo).' if Process.uid != 0
 
+input = interactive_input
+
 puts '===================================================='
 puts '   ASL3 INTERACTIVE GPSD & APRS CONFIGURATION TOOL  '
 puts '===================================================='
 puts ''
 
-print 'Enter your FCC Callsign (e.g., W5GLE): '
-base_callsign = $stdin.gets.chomp.strip.upcase
+base_callsign = ask(input, 'Enter your FCC Callsign (e.g., W5GLE)').upcase
 abort 'ERROR: Callsign cannot be blank.' if base_callsign.empty?
 
 aprs_passcode = calculate_aprs_passcode(base_callsign)
 puts "APRS passcode for #{base_callsign}: #{aprs_passcode}"
 
-print 'Enter APRS SSID suffix [default: 10]: '
-ssid = $stdin.gets.chomp.strip
-ssid = '10' if ssid.empty?
+ssid = ask(input, 'Enter APRS SSID suffix', default: '10')
 full_callsign = "#{base_callsign}-#{ssid}"
 
-print 'Enter USB GPS serial device for gpsd [default: /dev/ttyACM0]: '
-gps_device = $stdin.gets.chomp.strip
-gps_device = '/dev/ttyACM0' if gps_device.empty?
+gps_device = ask(input, 'Enter USB GPS serial device for gpsd', default: '/dev/ttyACM0')
 
-print 'Enter node RF frequency in MHz (e.g., 443.075): '
-rf_freq = $stdin.gets.chomp.strip
+rf_freq = ask(input, 'Enter node RF frequency in MHz (e.g., 443.075)')
 abort 'ERROR: RF frequency is required for the beacon comment.' if rf_freq.empty?
 
-print 'Enter CTCSS tone in Hz (e.g., 103.5, or 0.0 for none): '
-rf_tone = $stdin.gets.chomp.strip
-rf_tone = '0.0' if rf_tone.empty?
+rf_tone = ask(input, 'Enter CTCSS tone in Hz (e.g., 103.5, or 0.0 for none)', default: '0.0')
 
-print 'Enter short map beacon comment [default: ASL3 Node - Alvin, TX]: '
-comment = $stdin.gets.chomp.strip
-comment = 'ASL3 Node - Alvin, TX' if comment.empty?
+comment = ask(input, 'Enter short map beacon comment', default: 'ASL3 Node')
 map_comment = beacon_comment(comment, rf_freq, rf_tone)
 
+interval_str = ask(input, 'APRS beacon interval in seconds', default: DEFAULT_APRS_INTERVAL.to_s)
+interval = interval_str.to_i
+abort 'ERROR: APRS beacon interval must be at least 30 seconds.' if interval < 30
+
+input.close unless input.equal?($stdin)
+
 puts "\n--- System update & package installation ---"
-unless system('apt-get update && apt-get install -y gpsd gpsd-clients socat')
+unless system('env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get', 'update') &&
+       system('env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get', 'install', '-y', 'gpsd', 'gpsd-clients', 'socat')
   abort 'ERROR: Package installation failed.'
 end
 
@@ -161,7 +216,7 @@ gpsd_config = <<~GPSD
   USBAUTO="false"
   DEVICES="#{gps_device}"
   # No -b: allow gpsd to use native u-blox binary (readonly blocks satellite config).
-  GPSD_OPTIONS="-n -s #{DEFAULT_GPS_BAUD}"
+  GPSD_OPTIONS="-n -s #{GPSD_USB_BAUD}"
   OPTIONS=""
 GPSD
 
@@ -173,6 +228,8 @@ puts '[OK] gpsd enabled (shared GPS on localhost:2947).'
 puts "\n--- APRS NMEA bridge (gpsd -> app_gps) ---"
 ensure_asterisk_dialout!
 install_gpsd_nmea_bridge!
+install_asterisk_after_gps_bridge!
+wait_for_rptgps!
 
 puts "\n--- Writing /etc/asterisk/gps.conf ---"
 asterisk_gps_config = <<~ASTERISK
@@ -184,15 +241,17 @@ asterisk_gps_config = <<~ASTERISK
   password = #{aprs_passcode}
   server = rotate.aprs2.net
   port = 14580
-  interval = 60
-  icon = n
+  interval = #{interval}
+  icon = #{DEFAULT_APRS_ICON}
 
   comport = #{RPT_GPS_PTY}
-  baudrate = #{DEFAULT_GPS_BAUD}
+  baudrate = #{APP_GPS_BAUD}
 
-  power = 4
-  height = 4
-  gain = 6
+  ; PHG tuned for Shari PiHat-class nodes (~5W HT, rubber duck, omni, low HAAT)
+  power = #{DEFAULT_APRS_POWER}
+  height = #{DEFAULT_APRS_HEIGHT}
+  gain = #{DEFAULT_APRS_GAIN}
+  dir = #{DEFAULT_APRS_DIR}
   comment = #{map_comment}
 ASTERISK
 
