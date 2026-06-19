@@ -25,12 +25,13 @@ use File::Spec;
 use File::Path qw(make_path);
 use File::Copy;
 
-# Color codes for output
-my $GREEN  = "\033[0;32m";
-my $YELLOW = "\033[1;33m";
-my $RED    = "\033[0;31m";
-my $BLUE   = "\033[0;34m";
-my $NC     = "\033[0m";  # No Color
+# Color codes for output (disabled when stdout is not a TTY)
+my $use_color = -t STDOUT;
+my $GREEN  = $use_color ? "\033[0;32m" : '';
+my $YELLOW = $use_color ? "\033[1;33m" : '';
+my $RED    = $use_color ? "\033[0;31m" : '';
+my $BLUE   = $use_color ? "\033[0;34m" : '';
+my $NC     = $use_color ? "\033[0m" : '';
 
 # Enable autoflush for STDOUT
 $| = 1;
@@ -98,12 +99,32 @@ while (1) {
     }
 }
 
+# Return true if ssh config already has a Host stanza for PATTERN
+sub ssh_config_has_host {
+    my ($pattern) = @_;
+    return 0 unless -f $config_file;
+
+    open my $fh, '<', $config_file or return 0;
+    while (my $line = <$fh>) {
+        if ($line =~ /^\s*Host\s+(.+?)\s*$/) {
+            my @hosts = split /\s+/, $1;
+            return 1 if grep { $_ eq $pattern } @hosts;
+        }
+    }
+    return 0;
+}
+
 # Subroutine to add a host configuration
 sub add_host_config {
     print "\n${YELLOW}=== Add New Host Configuration ===${NC}\n";
     
     my $alias = prompt("Enter host alias (e.g., myserver): ", "");
     return unless $alias;
+
+    if (ssh_config_has_host($alias)) {
+        print "${YELLOW}Host $alias already exists in ${config_file}; skipping duplicate block.${NC}\n";
+        return;
+    }
     
     my $hostname = prompt("Enter hostname or IP address: ", "");
     return unless $hostname;
@@ -151,6 +172,11 @@ sub add_host_config {
 # Subroutine to configure global settings
 sub configure_global_settings {
     print "\n${YELLOW}=== Configure Global SSH Settings ===${NC}\n";
+
+    if (ssh_config_has_host('*')) {
+        print "${YELLOW}Host * already exists in ${config_file}; skipping duplicate global block.${NC}\n";
+        return;
+    }
     
     print "${BLUE}These settings will apply to all SSH connections by default.${NC}\n\n";
     
@@ -210,6 +236,11 @@ sub configure_agent_forwarding {
     
     my $host = prompt("Enter host alias or pattern (e.g., trusted-*, or * for all): ", "");
     return unless $host;
+
+    if (ssh_config_has_host($host)) {
+        print "${YELLOW}Host $host already exists in ${config_file}; skipping duplicate block.${NC}\n";
+        return;
+    }
     
     my $config = "\n# Agent forwarding for $host\n";
     $config .= "Host $host\n";
@@ -232,6 +263,12 @@ sub configure_keepalive {
     print "${BLUE}Keep-alive prevents SSH connections from timing out.${NC}\n\n";
     
     my $host = prompt("Enter host alias or pattern (* for all hosts): ", "*");
+
+    if (ssh_config_has_host($host)) {
+        print "${YELLOW}Host $host already exists in ${config_file}; skipping duplicate keep-alive block.${NC}\n";
+        return;
+    }
+
     my $interval = prompt("Server alive interval in seconds (default: 60): ", "60");
     my $count_max = prompt("Max server alive checks (default: 3): ", "3");
     
@@ -259,6 +296,11 @@ sub configure_jump_host {
     
     my $target_alias = prompt("Enter alias for target server: ", "");
     return unless $target_alias;
+
+    if (ssh_config_has_host($target_alias)) {
+        print "${YELLOW}Host $target_alias already exists in ${config_file}; skipping duplicate block.${NC}\n";
+        return;
+    }
     
     my $target_host = prompt("Enter target server hostname/IP: ", "");
     return unless $target_host;

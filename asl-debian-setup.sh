@@ -47,15 +47,11 @@ err()  { printf '%s%s%s\n' "${RED}" "$*" "${NC}"; }
 
 check_privileges() {
     if [ "$(id -u)" -ne 0 ]; then
-        if command -v sudo >/dev/null 2>&1; then
-            SUDO="sudo"
-        else
-            err "This script must be run as root or with sudo."
-            exit 1
-        fi
-    else
-        SUDO=""
+        err "This script must be run as root."
+        err "Use: curl -sSL .../asl-debian-setup.sh | sudo sh"
+        exit 1
     fi
+    SUDO=""
 }
 
 detect_os() {
@@ -94,7 +90,8 @@ detect_os() {
 
 setup_repo() {
     info "Downloading ${DEB_FILE}..."
-    DEB_PATH="${TMP_DIR}/${DEB_FILE}"
+    DEB_PATH="$(mktemp "${TMP_DIR}/asl-apt-repos.XXXXXX.deb")"
+    trap 'rm -f "${DEB_PATH}"' EXIT INT TERM
     if command -v curl >/dev/null 2>&1; then
         if ! curl -sSLf -o "${DEB_PATH}" "${REPO_BASE}/${DEB_FILE}"; then
             err "Failed to download ${DEB_FILE}"
@@ -111,18 +108,19 @@ setup_repo() {
     fi
 
     info "Installing AllStarLink package repository..."
-    if ! ${SUDO} dpkg -i "${DEB_PATH}"; then
-        err "dpkg install failed. You may need to run: ${SUDO} apt-get install -f"
+    if ! dpkg -i "${DEB_PATH}"; then
+        err "dpkg install failed. You may need to run: apt-get install -f"
         exit 1
     fi
 
     info "Updating package lists..."
-    if ! ${SUDO} apt-get update; then
+    if ! env DEBIAN_FRONTEND=noninteractive apt-get update; then
         err "apt-get update failed."
         exit 1
     fi
 
     rm -f "${DEB_PATH}"
+    trap - EXIT INT TERM
 
     info "AllStarLink repository setup complete."
 }
@@ -136,10 +134,10 @@ prompt_install() {
         READ_SOURCE="/dev/tty"
     else
         if [ "${VERSION_MAJOR}" = "12" ]; then
-            info "Run manually to install (Bookworm): ${SUDO} apt install asl3"
-            info "  or Pi appliance: ${SUDO} apt install asl3-pi-appliance"
+            info "Run manually to install (Bookworm): apt install asl3"
+            info "  or Pi appliance: apt install asl3-pi-appliance"
         else
-            info "Run manually to install: ${SUDO} apt install asl3"
+            info "Run manually to install: apt install asl3"
         fi
         return
     fi
@@ -192,7 +190,7 @@ prompt_install() {
     fi
 
     info "Installing ${PKG}..."
-    if ${SUDO} apt-get install -y "${PKG}"; then
+    if env DEBIAN_FRONTEND=noninteractive apt-get install -y "${PKG}"; then
         info "Installation complete."
     else
         err "Installation failed."

@@ -21,7 +21,7 @@ use warnings;
 use Getopt::Long;
 use File::Temp qw(tempfile);
 
-# Script to create a secure GPG key on Debian 13
+# Script to create a secure GPG key (Debian and other systems with GnuPG)
 # Usage: ./create_gpg_key.pl [--name "Your Name"] [--email "your@email.com"] [--key-type RSA|ED25519] [--expire-days N]
 
 my $name = '';

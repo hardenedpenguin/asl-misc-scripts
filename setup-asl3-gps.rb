@@ -80,14 +80,32 @@ def beacon_comment(user_comment, rf_freq, rf_tone)
   parts.join(' ')
 end
 
+def run!(*args)
+  return if system(*args)
+
+  abort "ERROR: Command failed: #{args.join(' ')}"
+end
+
+def warn_unless_gps_device!(device)
+  return if File.exist?(device)
+
+  puts "[WARN] GPS device #{device} not found. Plug in the receiver; gpsd will start when it appears."
+end
+
 def enable_app_gps!(modules_conf)
   return unless File.exist?(modules_conf)
 
   content = File.read(modules_conf)
-  return if content.match?(/^load\s*=\s*app_gps\.so/i)
+  return if content.match?(/^\s*load\s*[=:>]+\s*app_gps\.so\b/im)
 
-  updated = content.gsub(/^noload\s*[=:>]+\s*app_gps\.so.*$/i, 'load = app_gps.so                     ; GPS Interface')
-  return if updated == content
+  updated = content
+         .gsub(/^\s*;+\s*noload\s*[=:>]+\s*app_gps\.so.*$/i, 'load = app_gps.so                     ; GPS Interface')
+         .gsub(/^\s*noload\s*[=:>]+\s*app_gps\.so.*$/i, 'load = app_gps.so                     ; GPS Interface')
+
+  if updated == content
+    puts '[WARN] Could not enable app_gps.so automatically; set load = app_gps.so in modules.conf'
+    return
+  end
 
   FileUtils.cp(modules_conf, "#{modules_conf}.bak")
   File.write(modules_conf, updated)
@@ -115,9 +133,9 @@ def install_gpsd_nmea_bridge!
   UNIT
 
   File.write(GPSD_NMEA_BRIDGE_UNIT, unit)
-  system('systemctl daemon-reload')
-  system('systemctl enable gpsd-nmea-bridge.service')
-  system('systemctl restart gpsd-nmea-bridge.service')
+  run!('systemctl', 'daemon-reload')
+  run!('systemctl', 'enable', 'gpsd-nmea-bridge.service')
+  run!('systemctl', 'restart', 'gpsd-nmea-bridge.service')
   puts "[OK] Installed gpsd NMEA bridge -> #{RPT_GPS_PTY}"
 end
 
@@ -130,7 +148,7 @@ def install_asterisk_after_gps_bridge!
     After=gpsd-nmea-bridge.service
     Wants=gpsd-nmea-bridge.service
   DROPIN
-  system('systemctl daemon-reload')
+  run!('systemctl', 'daemon-reload')
   puts '[OK] Asterisk will start after gpsd NMEA bridge on boot.'
 end
 
@@ -169,6 +187,26 @@ def hint_saytime_gpsd!
   puts '    gpsd_port = 2947'
 end
 
+def verify_installation!
+  notes = []
+  notes << 'gpsd-nmea-bridge.service is not active' unless system('systemctl', 'is-active', '--quiet', 'gpsd-nmea-bridge.service')
+  notes << "#{RPT_GPS_PTY} is missing" unless File.exist?(RPT_GPS_PTY)
+
+  gps_status = `asterisk -rx 'gps show status' 2>/dev/null`
+  if gps_status.include?('Locked')
+    puts '[OK] Post-install: GPS locked in Asterisk.'
+  elsif gps_status.include?('Unlocked')
+    notes << 'GPS serial open but no fix yet (allow time for satellite lock and clear sky)'
+  else
+    notes << 'could not read gps show status from Asterisk'
+  end
+
+  return if notes.empty?
+
+  puts "\nPost-install notes:"
+  notes.each { |note| puts "  - #{note}" }
+end
+
 abort 'ERROR: This script must be run as root (sudo).' if Process.uid != 0
 
 input = interactive_input
@@ -188,6 +226,7 @@ ssid = ask(input, 'Enter APRS SSID suffix', default: '10')
 full_callsign = "#{base_callsign}-#{ssid}"
 
 gps_device = ask(input, 'Enter USB GPS serial device for gpsd', default: '/dev/ttyACM0')
+warn_unless_gps_device!(gps_device)
 
 rf_freq = ask(input, 'Enter node RF frequency in MHz (e.g., 443.075)')
 abort 'ERROR: RF frequency is required for the beacon comment.' if rf_freq.empty?
@@ -221,8 +260,10 @@ gpsd_config = <<~GPSD
 GPSD
 
 File.write('/etc/default/gpsd', gpsd_config)
-system('systemctl enable gpsd.socket gpsd.service 2>/dev/null')
-system('systemctl restart gpsd.service')
+unless system('systemctl', 'enable', 'gpsd.socket', 'gpsd.service')
+  run!('systemctl', 'enable', 'gpsd.service')
+end
+run!('systemctl', 'restart', 'gpsd.service')
 puts '[OK] gpsd enabled (shared GPS on localhost:2947).'
 
 puts "\n--- APRS NMEA bridge (gpsd -> app_gps) ---"
@@ -266,9 +307,10 @@ puts '[OK] /etc/asterisk/gps.conf written.'
 enable_app_gps!('/etc/asterisk/modules.conf')
 
 puts "\n--- Restarting Asterisk ---"
-system('systemctl restart asterisk')
+run!('systemctl', 'restart', 'asterisk')
 
 hint_saytime_gpsd!
+verify_installation!
 
 puts "\n===================================================="
 puts 'Configuration complete!'

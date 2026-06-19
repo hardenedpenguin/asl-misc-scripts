@@ -23,12 +23,13 @@ use strict;
 use warnings;
 use File::Spec;
 
-# Color codes for output
-my $GREEN  = "\033[0;32m";
-my $YELLOW = "\033[1;33m";
-my $RED    = "\033[0;31m";
-my $BLUE   = "\033[0;34m";
-my $NC     = "\033[0m";  # No Color
+# Color codes for output (disabled when stdout is not a TTY)
+my $use_color = -t STDOUT;
+my $GREEN  = $use_color ? "\033[0;32m" : '';
+my $YELLOW = $use_color ? "\033[1;33m" : '';
+my $RED    = $use_color ? "\033[0;31m" : '';
+my $BLUE   = $use_color ? "\033[0;34m" : '';
+my $NC     = $use_color ? "\033[0m" : '';
 
 # Enable autoflush for STDOUT
 $| = 1;
@@ -46,6 +47,17 @@ unless (-t STDIN) {
 }
 
 print "${GREEN}=== Certbot Installation and Configuration Tool ===${NC}\n\n";
+
+# Subroutine to run a command and return success
+sub run_cmd {
+    my (@cmd) = @_;
+    return system(@cmd) == 0;
+}
+
+sub command_exists {
+    my ($cmd) = @_;
+    return system('sh', '-c', 'command -v ' . quotemeta($cmd) . ' >/dev/null 2>&1') == 0;
+}
 
 # Check OS
 check_debian_os();
@@ -104,12 +116,21 @@ sub install_certbot {
     
     # Update package list
     print "${BLUE}Updating package list...${NC}\n";
-    system("apt-get update -qq");
+    unless (run_cmd("env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "update", "-qq")) {
+        print "${RED}Error: apt-get update failed.${NC}\n";
+        return;
+    }
     
-    # Check if snapd is available (recommended method)
-    my $snap_available = (system("which snap > /dev/null 2>&1") == 0);
+    my $arch = `uname -m 2>/dev/null` || '';
+    chomp $arch;
+    my $is_arm = $arch =~ /^(arm|aarch64)/;
+    
+    # Check if snapd is available (recommended method on x86; heavy on ARM Pis)
+    my $snap_available = command_exists('snap');
     my $use_snap = 0;
-    if ($snap_available) {
+    if ($snap_available && $is_arm) {
+        print "${YELLOW}ARM system detected; using apt (lighter than snap on Pi nodes).${NC}\n";
+    } elsif ($snap_available) {
         my $method = prompt("Install via snap (recommended) or apt? [snap/apt] (default: snap): ", "snap");
         $use_snap = 1 if lc($method) eq "snap";
     }
@@ -140,7 +161,7 @@ sub install_certbot {
     }
     
     # Check installation
-    if (system("which certbot > /dev/null 2>&1") == 0) {
+    if (command_exists('certbot')) {
         print "\n${GREEN}✓ Certbot installed successfully!${NC}\n";
         system("certbot --version");
     } else {

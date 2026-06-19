@@ -23,11 +23,12 @@ use strict;
 use warnings;
 use File::Spec;
 
-# Color codes for output
-my $GREEN  = "\033[0;32m";
-my $YELLOW = "\033[1;33m";
-my $RED    = "\033[0;31m";
-my $NC     = "\033[0m";  # No Color
+# Color codes for output (disabled when stdout is not a TTY)
+my $use_color = -t STDOUT;
+my $GREEN  = $use_color ? "\033[0;32m" : '';
+my $YELLOW = $use_color ? "\033[1;33m" : '';
+my $RED    = $use_color ? "\033[0;31m" : '';
+my $NC     = $use_color ? "\033[0m" : '';
 
 # Enable autoflush for STDOUT
 $| = 1;
@@ -39,6 +40,10 @@ my $input_fh = (-t STDIN) ? \*STDIN : do {
 };
 
 print "${GREEN}=== SSH Key Generation and Setup ===${NC}\n\n";
+
+if ($< == 0 && !$ENV{SUDO_USER}) {
+    print "${YELLOW}Warning: running as root without sudo; keys will be created in /root/.ssh${NC}\n\n";
+}
 
 # Prompt for key type
 print "Select SSH key type:\n";
@@ -170,10 +175,18 @@ sub prompt {
 }
 
 # Subroutine to expand tilde (~) in paths
+sub effective_home {
+    if ($< == 0 && $ENV{SUDO_USER}) {
+        my @pw = getpwnam($ENV{SUDO_USER});
+        return $pw[7] if @pw;
+    }
+    return $ENV{HOME} || (getpwuid($<))[7];
+}
+
 sub expand_tilde {
     my ($path) = @_;
     return $path unless $path =~ /^~/;
-    my $home = $ENV{HOME} || (getpwuid($<))[7];
+    my $home = effective_home();
     $path =~ s/^~/$home/;
     return $path;
 }

@@ -74,12 +74,26 @@ sub prompt_yes_no {
 my %config;
 
 print "\n--- User Information ---\n";
-$config{user_name} = prompt("Your name");
-$config{user_email} = prompt("Your email");
+do {
+    $config{user_name} = prompt("Your name");
+} while ($config{user_name} eq '');
+do {
+    $config{user_email} = prompt("Your email");
+} while ($config{user_email} eq '');
 
 print "\n--- Core Settings ---\n";
 $config{editor} = prompt("Preferred editor", "nano");
 $config{excludesfile} = prompt("Global gitignore file path", "~/.gitignore_global");
+my $ignore_path = $config{excludesfile};
+$ignore_path =~ s/^~/$ENV{HOME}/;
+unless (-f $ignore_path) {
+    unless (-e $ignore_path) {
+        if (open my $fh, '>', $ignore_path) {
+            close $fh;
+            print "Created empty gitignore file: $ignore_path\n";
+        }
+    }
+}
 $config{fileMode} = prompt_yes_no("Set fileMode to false (recommended for Windows/WSL)", 1);
 
 print "\n--- Color Settings ---\n";
