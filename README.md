@@ -26,9 +26,58 @@ Configures the AllStarLink repository on Debian 12/13, then optionally installs 
 curl -sSL https://raw.githubusercontent.com/hardenedpenguin/asl-misc-scripts/refs/heads/main/setup-asl3-gps.rb | sudo ruby
 ```
 
-Interactive setup for **gpsd**, shared GPS on `127.0.0.1:2947`, and **APRS** via `app_gps` on an ASL3 node. gpsd owns the USB receiver (for saytime, SkywarnPlus, `cgps`, and similar clients). A `gpsd-nmea-bridge` systemd unit replays NMEA to `/dev/rptgps` because `app_gps` only reads a serial-style stream.
+Interactive setup for **APRS-IS position beacons** on an ASL3 node via Asterisk `app_gps`. Run from a TTY as root (`sudo ruby` or the curl one-liner above). The script walks through prompts, shows a full configuration summary (with PHG values decoded), and asks for confirmation before writing anything.
 
-The script installs `gpsd`, `gpsd-clients`, and `socat`; writes `/etc/default/gpsd` and `/etc/asterisk/gps.conf` (APRS passcode from callsign); enables `app_gps.so` in `modules.conf`; and restarts gpsd and Asterisk. Defaults target **Shari PiHat-class** low-power Pi nodes (~5W HT, rubber duck, omni): 180s beacon interval, car icon (`>`), and PHG power/height/gain of 2/1/1. Run as root and answer prompts for callsign, SSID, USB device (`/dev/ttyACM0` default), RF frequency, tone, beacon comment, and interval.
+#### Station modes
+
+| Mode | GPS hardware | gpsd installed? | Position source |
+|------|--------------|-----------------|-----------------|
+| **Fixed** | No | No | Fixed `lat` / `lon` / `elev` in `gps.conf` |
+| **Mobile** | USB dongle | Yes (if not already) | Live GPS via gpsd; fallback lat/lon when unlocked |
+
+Both modes support **radioless** nodes (hubs, links, GPS-only trackers): skip RF frequency and tone, set `freq = 0.0` / `tone = 0.0`, and use a plain map comment. Mobile + radioless still installs gpsd and the NMEA bridge so APRS tracks the dongle without pretending the node has RF.
+
+#### What the script configures
+
+**Always (fixed and mobile):**
+
+- `/etc/asterisk/gps.conf` — callsign/SSID, APRS-IS passcode (computed; masked as `*****` on screen), server region, beacon interval, map icon, PHG power/height/gain/dir, comment, lat/lon/elev
+- `/etc/asterisk/modules.conf` — enables `app_gps.so` if still set to `noload`
+- Restarts Asterisk
+
+**Mobile only:**
+
+- Installs `gpsd`, `gpsd-clients`, and `socat` if missing
+- `/etc/default/gpsd` — USB device (default `/dev/ttyACM0`)
+- `gpsd-nmea-bridge.service` — replays NMEA to `/dev/rptgps` (because `app_gps` reads a serial stream, not gpsd directly)
+- Shared GPS on `127.0.0.1:2947` for saytime, SkywarnPlus-NG, `cgps`, and similar clients
+- Adds `asterisk` to group `dialout` if needed; Asterisk starts after the bridge on boot
+
+**Not changed:** `rpt.conf` (APRSStt is separate; not required for standard beacons).
+
+#### Prompts and clarity
+
+- **Decimal precision** — tells you how many places to use: lat/lon (4), elevation in meters MSL (1, not HAAT), MHz (3), tone Hz (1)
+- **PHG fields** — shows the full 0–9 digit tables; enter a digit or a real-world value (watts, feet HAAT, dBi, degrees); reports what APRS maps will actually display
+- **Elevation vs HAAT** — `elev` is meters above sea level; antenna height above terrain is the separate PHG `height` digit
+- **Re-run safety** — backs up existing `gps.conf` to `gps.conf.bak`; abort at the final confirmation leaves the system unchanged
+
+#### Defaults by mode
+
+| Setting | Fixed | Mobile |
+|---------|-------|--------|
+| SSID | `-1` | `-10` |
+| Beacon interval | 1800 s | 180 s |
+| Map icon | `-` (house) | `>` (car) |
+| PHG power/height/gain | 3 / 5 / 3 | 2 / 1 / 1 |
+
+#### After setup
+
+```text
+asterisk -rx 'gps show status'
+```
+
+Mobile: `cgps -s` and `ls -l /dev/rptgps`. Map: `https://aprs.fi/#!call=YOURCALL-SSID`
 
 ### setup_ssh_key.pl
 
