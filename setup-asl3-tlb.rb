@@ -1,0 +1,431 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+#
+# Copyright (C) 2026 Jory A. Pratt, W5GLE <geekypenguin@gmail.com>
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# setup-asl3-tlb.rb - Configure TheLinkBox (chan_tlb) on AllStarLink 3
+#
+# EXPERIMENTAL / UNTESTED — not yet validated on production nodes.
+#
+# TheLinkBox (TLB) bridges AllStar to EchoLink, IRLP, conferences, and other
+# TLB/RTP peers via the chan_tlb channel driver. ASL3 ships chan_tlb but leaves
+# it disabled (noload) in modules.conf by default.
+#
+# Docs:  https://allstarlink.github.io/config/tlb_conf/
+# Forum: https://community.allstarlink.org/t/tlb-conf-configuration/23504
+#
+# Non-interactive example:
+#   ASL_NODE=63001 ASL_CALL=W5GLE-R TLB_PEERS='1001=REF1234,1.2.3.4,44966,ULAW' \
+#     curl -sSL .../setup-asl3-tlb.rb | sudo ruby
+
+require 'fileutils'
+require 'time'
+
+MODULES_CONF = '/etc/asterisk/modules.conf'
+TLB_CONF = '/etc/asterisk/tlb.conf'
+RPT_CONF = '/etc/asterisk/rpt.conf'
+RPT_HTTP_REG = '/etc/asterisk/rpt_http_registrations.conf'
+BACKUP_DIR = '/var/asl-backups/tlb-setup'
+CRON_FILE = '/etc/cron.d/asl3-tlb-keepalive'
+KEEPALIVE_LOG = '/var/log/asterisk/tlb-keepalive.log'
+
+VALID_CODECS = %w[ULAW G726 GSM].freeze
+
+Peer = Struct.new(:priv_node, :remote_call, :remote_ip, :remote_port, :codec, keyword_init: true)
+
+def interactive_input
+  return $stdin if $stdin.tty?
+
+  File.open('/dev/tty', 'r')
+rescue Errno::ENOENT, Errno::EACCES, Errno::EPERM
+  nil
+end
+
+def ask(input, prompt, default: nil)
+  suffix = default.nil? ? '' : " [#{default}]"
+  print "#{prompt}#{suffix}: "
+  line = input.gets
+  abort 'ERROR: Input interrupted.' if line.nil?
+
+  value = line.chomp.strip
+  value.empty? && !default.nil? ? default.to_s : value
+end
+
+def ask_yes_no(input, prompt, default: false)
+  default_label = default ? 'Y/n' : 'y/N'
+  answer = ask(input, "#{prompt} (#{default_label})", default: nil)
+  return default if answer.empty?
+
+  answer.match?(/\A[Yy]/)
+end
+
+def run!(*args)
+  return if system(*args)
+
+  abort "ERROR: Command failed: #{args.join(' ')}"
+end
+
+def require_asl3!
+  abort "ERROR: Not an ASL3 node: #{RPT_CONF} missing." unless File.file?(RPT_CONF)
+  abort "ERROR: Not an ASL3 node: #{MODULES_CONF} missing." unless File.file?(MODULES_CONF)
+  abort 'ERROR: asterisk not found in PATH.' unless system('command', '-v', 'asterisk', out: File::NULL, err: File::NULL)
+end
+
+def detect_primary_node
+  return ENV['ASL_NODE'] if ENV['ASL_NODE'] && !ENV['ASL_NODE'].empty?
+
+  File.foreach(RPT_CONF) do |line|
+    next unless line.match?(/^\[(\d+)\]/)
+
+    return Regexp.last_match(1)
+  end
+  nil
+end
+
+def detect_callsign(node)
+  return ENV['ASL_CALL'] if ENV['ASL_CALL'] && !ENV['ASL_CALL'].empty?
+
+  if File.file?(RPT_HTTP_REG)
+    File.foreach(RPT_HTTP_REG) do |line|
+      next unless line.match?(/^call\s*=\s*(.+)/i)
+
+      call = Regexp.last_match(1).strip.delete(';')
+      return call unless call.empty?
+    end
+  end
+
+  node ? "AS#{node}" : nil
+end
+
+def validate_port!(port)
+  abort "ERROR: Invalid UDP port: #{port} (must be an even number, default 44966)" unless port.to_s.match?(/\A\d+\z/)
+
+  port_i = port.to_i
+  abort "ERROR: TLB port must be even (RTP uses port and port+1): #{port}" unless port_i.even?
+  port_i
+end
+
+def validate_codec!(codec)
+  normalized = codec.to_s.strip.upcase
+  return normalized if VALID_CODECS.include?(normalized)
+
+  abort "ERROR: Unsupported codec '#{codec}' (use ULAW, G726, or GSM)"
+end
+
+def backup_file!(path)
+  return unless File.file?(path)
+
+  FileUtils.mkdir_p(BACKUP_DIR)
+  ts = Time.now.strftime('%Y%m%d-%H%M%S')
+  dest = File.join(BACKUP_DIR, "#{File.basename(path)}.#{ts}.bak")
+  FileUtils.cp(path, dest, preserve: true)
+  puts "[OK] Backed up #{path} -> #{dest}"
+end
+
+def enable_chan_tlb!(modules_conf)
+  content = File.read(modules_conf)
+  if content.match?(/^load\s*=>\s*chan_tlb\.so/im)
+    puts "[OK] chan_tlb.so already enabled in #{modules_conf}"
+    return
+  end
+
+  updated = content.sub(/^noload\s*=>\s*chan_tlb\.so/im, 'load => chan_tlb.so')
+  if updated != content
+    File.write(modules_conf, updated)
+    puts "[OK] Enabled chan_tlb.so in #{modules_conf}"
+    return
+  end
+
+  File.open(modules_conf, 'a') do |f|
+    f.puts
+    f.puts '; Added by setup-asl3-tlb.rb'
+    f.puts 'load => chan_tlb.so'
+  end
+  puts "[WARN] chan_tlb.so not found in #{modules_conf}; appended load line."
+end
+
+def build_tlb_conf(node:, call:, port:, bind_ip:, codec:, peers:)
+  bind_line = bind_ip && !bind_ip.empty? && bind_ip != '0.0.0.0' ? "ipaddr = #{bind_ip}\n" : ''
+  nodes_body = peers.map { |p| "#{p.priv_node} = #{p.remote_call},#{p.remote_ip},#{p.remote_port},#{p.codec}" }.join("\n")
+
+  <<~CONF
+    ; TheLinkBox / chan_tlb configuration
+    ; Generated by setup-asl3-tlb.rb on #{Time.now.iso8601}
+    ; Manual: https://allstarlink.github.io/config/tlb_conf/
+
+    [tlb0]
+    call = #{call}
+    port = #{port}
+    #{bind_line}astnode = #{node}
+    context = radio-secure
+    codec = #{codec}
+
+    [nodes]
+    #{nodes_body}
+  CONF
+end
+
+def write_tlb_conf!(content)
+  File.write(TLB_CONF, content)
+  begin
+    FileUtils.chown('asterisk', 'asterisk', TLB_CONF) if Process.uid.zero?
+  rescue Errno::EPERM, Errno::ENOENT
+    # asterisk user may not exist on non-ASL test hosts
+  end
+  FileUtils.chmod(0o644, TLB_CONF)
+  puts "[OK] Wrote #{TLB_CONF}"
+end
+
+def parse_peers_env!(peers_env, default_codec:)
+  abort 'ERROR: TLB_PEERS is empty.' if peers_env.nil? || peers_env.strip.empty?
+
+  peers_env.split('|').filter_map do |entry|
+    entry = entry.strip
+    next if entry.empty?
+
+    priv, rest = entry.split('=', 2)
+    abort "ERROR: Invalid TLB_PEERS entry: #{entry}" if priv.nil? || rest.nil? || priv.empty?
+
+    call, ip, port, codec = rest.split(',', 4)
+    abort "ERROR: Invalid TLB_PEERS entry: #{entry}" if [call, ip, port].any?(&:nil?) || [call, ip, port].any?(&:empty?)
+
+    port_i = validate_port!(port)
+    codec_norm = validate_codec!(codec.nil? || codec.empty? ? default_codec : codec)
+
+    Peer.new(
+      priv_node: priv.strip,
+      remote_call: call.strip,
+      remote_ip: ip.strip,
+      remote_port: port_i,
+      codec: codec_norm
+    )
+  end.tap do |list|
+    abort 'ERROR: TLB_PEERS produced no peer entries.' if list.empty?
+  end
+end
+
+def collect_peers_interactive!(input, default_codec:)
+  peers = []
+  puts
+  puts 'Define remote TheLinkBox peers (private node numbers on this system).'
+  puts 'Format: privatenode = TLB-CALL, IP, PORT [, CODEC]'
+  puts 'Leave private node blank when finished.'
+  puts
+
+  loop do
+    priv = ask(input, 'Private node number (e.g. 1001)', default: '')
+    break if priv.empty?
+
+    abort "ERROR: Private node must be numeric: #{priv}" unless priv.match?(/\A\d+\z/)
+
+    remote_call = ask(input, 'Remote TLB callsign', default: '')
+    abort 'ERROR: Remote callsign required.' if remote_call.empty?
+
+    remote_ip = ask(input, 'Remote IP address', default: '')
+    abort 'ERROR: Remote IP required.' if remote_ip.empty?
+
+    remote_port = validate_port!(ask(input, 'Remote UDP port (even)', default: '44966'))
+    codec = validate_codec!(ask(input, 'Codec (ULAW/G726/GSM)', default: default_codec))
+
+    peers << Peer.new(
+      priv_node: priv,
+      remote_call: remote_call,
+      remote_ip: remote_ip,
+      remote_port: remote_port,
+      codec: codec
+    )
+  end
+
+  abort 'ERROR: At least one [nodes] peer entry is required.' if peers.empty?
+  peers
+end
+
+def firewalld_active?
+  system('command', '-v', 'firewall-cmd', out: File::NULL, err: File::NULL) &&
+    system('firewall-cmd', '--state', out: File::NULL, err: File::NULL)
+end
+
+def open_firewall!(port)
+  rtcp = port + 1
+  unless firewalld_active?
+    puts "[WARN] firewalld not running; open UDP #{port} and #{rtcp} manually (e.g. firewall-cmd --permanent --add-port=#{port}/udp)."
+    return
+  end
+
+  [port, rtcp].each do |p|
+    run!('firewall-cmd', '--permanent', "--add-port=#{p}/udp")
+  end
+  run!('firewall-cmd', '--reload')
+  puts "[OK] Opened UDP #{port} and #{rtcp} in firewalld (permanent)."
+end
+
+def install_keepalive_cron!(node:, priv:, hours:)
+  interval = hours.to_i
+  interval = 12 if interval < 1
+
+  File.write(
+    CRON_FILE,
+    <<~CRON
+      # Disconnect/reconnect TLB peer #{priv} every #{interval} hours (chan_tlb stability workaround)
+      0 */#{interval} * * * root /usr/sbin/asterisk -rx 'rpt disconnect #{node} #{priv}' >/dev/null 2>&1; sleep 5; /usr/sbin/asterisk -rx 'rpt connect #{node} #{priv}' >> #{KEEPALIVE_LOG} 2>&1
+    CRON
+  )
+  FileUtils.chmod(0o644, CRON_FILE)
+  FileUtils.touch(KEEPALIVE_LOG)
+  puts "[OK] Installed keepalive cron (#{interval}h) for private node #{priv} -> #{CRON_FILE}"
+end
+
+def restart_asterisk!
+  if system('command', '-v', 'systemctl', out: File::NULL, err: File::NULL)
+    run!('systemctl', 'restart', 'asterisk')
+  else
+    run!('service', 'asterisk', 'restart')
+  end
+  puts '[OK] Restarted asterisk.'
+end
+
+def print_summary(node:, call:, port:, peers:, keepalive:)
+  first_priv = peers.first.priv_node
+  puts <<~SUMMARY
+
+    ======================================================================
+    TheLinkBox (chan_tlb) setup complete
+    ======================================================================
+    Local node:     #{node}
+    TLB call sign:  #{call}
+    Listen ports:   #{port}/udp (RTP) and #{port + 1}/udp (RTCP)
+    Config file:    #{TLB_CONF}
+    Keepalive cron: #{keepalive ? 'yes' : 'no'}
+
+    Connect from Asterisk CLI (example):
+      asterisk -rx 'rpt connect #{node} #{first_priv}'
+
+    Remote TheLinkBox server must allow this node in tlb.acl and set RTP_Port
+    to match the port configured here. See your TLB operator documentation.
+
+    Notes (ASL3 community best practice):
+      - Do NOT set rxchannel=tlb/tlb0 in rpt.conf unless you have a dedicated
+        TLB-only node; most installs keep SimpleUSB/USBRadio as rxchannel.
+      - If outbound connect fails, ensure the private node is not registered on
+        AllStarLink (use a private/NNX number) and check chan_tlb logs.
+      - chan_tlb can drop long-lived links; enable keepalive during setup or
+        set TLB_KEEPALIVE=1 for non-interactive installs.
+
+    Verify:
+      asterisk -rx 'module show like tlb'
+      asterisk -rx 'rpt show registrations'
+    ======================================================================
+  SUMMARY
+end
+
+def print_config_summary(node:, call:, port:, bind_ip:, codec:, peers:, keepalive:, keepalive_priv:, keepalive_hours:)
+  puts
+  puts '--- Configuration summary ---'
+  puts "  Local node (astnode): #{node}"
+  puts "  TLB call sign:        #{call}"
+  puts "  Local UDP port:       #{port} (RTCP #{port + 1})"
+  puts "  Bind IP:              #{bind_ip.empty? ? '(all interfaces)' : bind_ip}"
+  puts "  Default codec:        #{codec}"
+  peers.each do |p|
+    puts "  Peer #{p.priv_node}: #{p.remote_call} @ #{p.remote_ip}:#{p.remote_port} (#{p.codec})"
+  end
+  if keepalive
+    puts "  Keepalive:            every #{keepalive_hours}h on private node #{keepalive_priv}"
+  else
+    puts '  Keepalive:            no'
+  end
+  puts '-----------------------------'
+end
+
+# --- main ---
+
+abort 'ERROR: This script must be run as root (sudo).' if Process.uid != 0
+
+require_asl3!
+
+node = detect_primary_node
+call = detect_callsign(node)
+port = (ENV['TLB_PORT'] || '44966').to_i
+codec = validate_codec!(ENV['TLB_CODEC'] || 'ULAW')
+bind_ip = ENV['TLB_BIND_IP'].to_s
+noninteractive = !ENV['TLB_PEERS'].to_s.strip.empty?
+
+if noninteractive
+  abort 'ERROR: Set ASL_NODE for non-interactive mode.' if node.nil? || node.empty?
+  abort 'ERROR: Set ASL_CALL for non-interactive mode.' if call.nil? || call.empty?
+
+  port = validate_port!(port)
+  peers = parse_peers_env!(ENV['TLB_PEERS'], default_codec: codec)
+  keepalive = ENV['TLB_KEEPALIVE'] == '1'
+  keepalive_priv = ENV['TLB_KEEPALIVE_PRIV'].to_s.strip
+  keepalive_priv = peers.first.priv_node if keepalive && keepalive_priv.empty?
+  keepalive_hours = (ENV['TLB_KEEPALIVE_HOURS'] || '12').to_i
+else
+  input = interactive_input
+  abort <<~MSG.strip unless input
+    ERROR: Interactive terminal required.
+    Run from a TTY: sudo ruby #{File.basename($PROGRAM_NAME)}
+    Or set TLB_PEERS (and ASL_NODE, ASL_CALL) for non-interactive mode.
+  MSG
+
+  puts '===================================================='
+  puts '     ASL3 TheLinkBox (chan_tlb) SETUP'
+  puts '===================================================='
+  puts
+  puts 'If you meant something other than TLB/TheLinkBox, stop now (Ctrl-C).'
+  puts
+
+  node = ask(input, 'Local app_rpt node number (astnode)', default: node)
+  abort 'ERROR: Node number is required.' if node.empty?
+
+  call = ask(input, 'Local TLB call sign (call=)', default: call)
+  abort 'ERROR: Call sign is required.' if call.empty?
+
+  port = validate_port!(ask(input, 'Local TLB UDP port (even)', default: port.to_s))
+  bind_ip = ask(input, 'Bind IP (blank = all interfaces)', default: bind_ip)
+  codec = validate_codec!(ask(input, 'Default codec', default: codec))
+
+  peers = collect_peers_interactive!(input, default_codec: codec)
+
+  keepalive = ask_yes_no(input, 'Install periodic TLB reconnect cron?', default: false)
+  keepalive_priv = peers.first.priv_node
+  keepalive_hours = 12
+  if keepalive
+    keepalive_priv = ask(input, 'Private node for keepalive', default: keepalive_priv)
+    keepalive_hours = ask(input, 'Reconnect interval (hours)', default: '12').to_i
+    keepalive_hours = 12 if keepalive_hours < 1
+  end
+
+  print_config_summary(
+    node: node, call: call, port: port, bind_ip: bind_ip, codec: codec,
+    peers: peers, keepalive: keepalive, keepalive_priv: keepalive_priv,
+    keepalive_hours: keepalive_hours
+  )
+
+  unless ask_yes_no(input, 'Write configuration and restart asterisk?', default: true)
+    puts 'Aborted — no changes written.'
+    input.close unless input.equal?($stdin)
+    exit 0
+  end
+
+  input.close unless input.equal?($stdin)
+end
+
+backup_file!(MODULES_CONF)
+backup_file!(TLB_CONF)
+
+enable_chan_tlb!(MODULES_CONF)
+write_tlb_conf!(build_tlb_conf(node: node, call: call, port: port, bind_ip: bind_ip, codec: codec, peers: peers))
+open_firewall!(port)
+
+if keepalive
+  install_keepalive_cron!(node: node, priv: keepalive_priv, hours: keepalive_hours)
+end
+
+restart_asterisk!
+print_summary(node: node, call: call, port: port, peers: peers, keepalive: keepalive)
