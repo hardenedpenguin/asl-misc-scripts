@@ -16,7 +16,7 @@ Run directly from GitHub with curl. Copy the line for the script you need.
 |--------|------|------|--------------|-------|
 | `asl-debian-setup.sh` | yes | — | no | Debian 12/13 repo + optional install |
 | `setup-asl3-gps.rb` | yes | yes | no | Interactive APRS setup |
-| `check-asl3-gps.rb` | no* | yes | no | Read-only diagnostic (*sudo helps for services) |
+| `check-asl3-gps.rb` | yes | yes | no | Read-only APRS/GPS diagnostic |
 | `setup-asl3-tlb.rb` | yes | yes | **yes** | TheLinkBox / chan_tlb |
 | `setup-44connect-forward.rb` | yes | yes | **yes** | 44Net firewalld forwards |
 | `setup_ssh_key.pl` | no | — | no | Run as your user, not root |
@@ -98,10 +98,10 @@ Mobile: `cgps -s` and `ls -l /dev/rptgps`. Map: `https://aprs.fi/#!call=YOURCALL
 ### check-asl3-gps.rb
 
 ```sh
-curl -sSL https://raw.githubusercontent.com/hardenedpenguin/asl-misc-scripts/refs/heads/main/check-asl3-gps.rb | ruby
+curl -sSL https://raw.githubusercontent.com/hardenedpenguin/asl-misc-scripts/refs/heads/main/check-asl3-gps.rb | sudo ruby
 ```
 
-Read-only diagnostic for APRS/GPS on an ASL3 node: `gps.conf`, `app_gps` module state, `gps show status`, and (when configured) gpsd, the NMEA bridge, and `/dev/rptgps`. Exits non-zero if critical issues are found. Safe to run anytime; does not change configuration.
+Read-only diagnostic for APRS/GPS on an ASL3 node: `gps.conf`, `app_gps` module state, `gps show status`, and (when configured) gpsd, the NMEA bridge, and `/dev/rptgps`. Requires **root** (`sudo ruby`) to query the Asterisk CLI. Exits non-zero if critical issues are found. Safe to run anytime; does not change configuration.
 
 ### setup-asl3-tlb.rb
 

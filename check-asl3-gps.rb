@@ -38,11 +38,23 @@ def read_gps_conf
   conf
 end
 
+def asterisk_command(cmd)
+  output = `asterisk -rx #{cmd} 2>&1`.strip
+  [output, $?.success?]
+end
+
 issues = 0
 warns = 0
+root = Process.uid.zero?
 
 puts '=== ASL3 APRS / GPS diagnostic ==='
 puts
+
+unless root
+  warn 'Not running as root — Asterisk CLI checks will be skipped.'
+  puts '      For full results: curl -sSL .../check-asl3-gps.rb | sudo ruby'
+  puts
+end
 
 unless File.file?('/etc/asterisk/rpt.conf')
   fail 'Not an ASL3 node (/etc/asterisk/rpt.conf missing)'
@@ -95,22 +107,26 @@ else
 end
 
 puts
-gps_status = `asterisk -rx 'gps show status' 2>/dev/null`.strip
-if gps_status.empty?
-  fail 'Could not run: asterisk -rx \'gps show status\''
-  issues += 1
-else
-  puts 'Asterisk gps show status:'
-  gps_status.each_line { |line| puts "  #{line.chomp}" }
+if root
+  gps_status, ok_cmd = asterisk_command("'gps show status'")
+  if !ok_cmd || gps_status.empty?
+    fail "Could not run Asterisk GPS status#{gps_status.empty? ? '' : ": #{gps_status}"}"
+    issues += 1
+  else
+    puts 'Asterisk gps show status:'
+    gps_status.each_line { |line| puts "  #{line.chomp}" }
 
-  if gps_status.include?('Locked')
-    ok 'GPS locked in Asterisk'
-  elsif gps_status.include?('Unlocked')
-    warn 'GPS serial open but no fix (check sky view / antenna)'
-    warns += 1
-  elsif gps_status.include?('default')
-    ok 'Using fixed default position (expected for fixed-mode nodes)'
+    if gps_status.include?('Locked')
+      ok 'GPS locked in Asterisk'
+    elsif gps_status.include?('Unlocked')
+      warn 'GPS serial open but no fix (check sky view / antenna)'
+      warns += 1
+    elsif gps_status.include?('default')
+      ok 'Using fixed default position (expected for fixed-mode nodes)'
+    end
   end
+else
+  puts 'Asterisk gps show status: (skipped — requires root/sudo)'
 end
 
 if mobile || File.file?("/etc/systemd/system/#{BRIDGE_UNIT}")
