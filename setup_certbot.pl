@@ -141,23 +141,31 @@ sub install_certbot {
         # Install snapd if not present
         unless ($snap_available) {
             print "${YELLOW}Installing snapd...${NC}\n";
-            system("apt-get install -y snapd");
-            system("systemctl enable --now snapd.socket");
-            system("ln -sf /var/lib/snapd/snap /snap");
+            unless (run_cmd("env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "snapd")) {
+                print "${RED}Error: snapd installation failed.${NC}\n";
+                return;
+            }
+            run_cmd("systemctl", "enable", "--now", "snapd.socket");
+            run_cmd("ln", "-sf", "/var/lib/snapd/snap", "/snap");
         }
         
         # Remove old certbot if installed via apt
-        system("apt-get remove -y certbot 2>/dev/null");
+        run_cmd("apt-get", "remove", "-y", "certbot");
         
-        # Install certbot via snap
-        system("snap install core");
-        system("snap refresh core");
-        system("snap install --classic certbot");
-        system("ln -sf /snap/bin/certbot /usr/bin/certbot");
+        unless (run_cmd("snap", "install", "core") &&
+                run_cmd("snap", "refresh", "core") &&
+                run_cmd("snap", "install", "--classic", "certbot")) {
+            print "${RED}Error: Certbot snap installation failed.${NC}\n";
+            return;
+        }
+        run_cmd("ln", "-sf", "/snap/bin/certbot", "/usr/bin/certbot");
         
     } else {
         print "${BLUE}Installing certbot via apt...${NC}\n";
-        system("apt-get install -y certbot");
+        unless (run_cmd("env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "certbot")) {
+            print "${RED}Error: apt certbot installation failed.${NC}\n";
+            return;
+        }
     }
     
     # Check installation
@@ -178,18 +186,30 @@ sub install_certbot {
     
     if ($plugin eq "1") {
         if ($use_snap) {
-            system("snap set certbot trust-plugin-with-root=ok");
-            system("snap install certbot-apache");
+            run_cmd("snap", "set", "certbot", "trust-plugin-with-root=ok");
+            unless (run_cmd("snap", "install", "certbot-apache")) {
+                print "${RED}Error: Apache plugin installation failed.${NC}\n";
+                return;
+            }
         } else {
-            system("apt-get install -y python3-certbot-apache");
+            unless (run_cmd("env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "python3-certbot-apache")) {
+                print "${RED}Error: Apache plugin installation failed.${NC}\n";
+                return;
+            }
         }
         print "${GREEN}✓ Apache plugin installed${NC}\n";
     } elsif ($plugin eq "2") {
         if ($use_snap) {
-            system("snap set certbot trust-plugin-with-root=ok");
-            system("snap install certbot-nginx");
+            run_cmd("snap", "set", "certbot", "trust-plugin-with-root=ok");
+            unless (run_cmd("snap", "install", "certbot-nginx")) {
+                print "${RED}Error: Nginx plugin installation failed.${NC}\n";
+                return;
+            }
         } else {
-            system("apt-get install -y python3-certbot-nginx");
+            unless (run_cmd("env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "python3-certbot-nginx")) {
+                print "${RED}Error: Nginx plugin installation failed.${NC}\n";
+                return;
+            }
         }
         print "${GREEN}✓ Nginx plugin installed${NC}\n";
     }
@@ -299,22 +319,27 @@ sub setup_auto_renewal {
     print "${YELLOW}Certificates will be checked for renewal twice daily.${NC}\n";
 }
 
+sub certbot_renewal_timer_present {
+    my $timers = `systemctl list-timers --all 2>/dev/null` || '';
+    return 1 if $timers =~ /certbot\.timer|certbot-renewal\.timer|snap\.certbot\.renew\.timer/;
+    return 0;
+}
+
 # Set up systemd timer
 sub setup_systemd_timer {
     print "${BLUE}Setting up systemd timer...${NC}\n";
     
-    # Check if timer already exists
-    if (system("systemctl list-timers | grep -q certbot") == 0) {
-        print "${YELLOW}Certbot timer already exists.${NC}\n";
-        system("systemctl status certbot.timer --no-pager");
-    } else {
-        # Create timer and service files
-        my $service_file = "/etc/systemd/system/certbot-renewal.service";
-        my $timer_file = "/etc/systemd/system/certbot-renewal.timer";
-        
-        # Service file
-        open my $svc, '>', $service_file or die "Cannot create service file: $!\n";
-        print $svc <<'EOF';
+    if (certbot_renewal_timer_present()) {
+        print "${YELLOW}A certbot renewal timer is already present; skipping custom timer.${NC}\n";
+        system("systemctl", "list-timers", "--all", "certbot.timer", "certbot-renewal.timer", "snap.certbot.renew.timer");
+        return;
+    }
+
+    my $service_file = "/etc/systemd/system/certbot-renewal.service";
+    my $timer_file = "/etc/systemd/system/certbot-renewal.timer";
+    
+    open my $svc, '>', $service_file or die "Cannot create service file: $!\n";
+    print $svc <<'EOF';
 [Unit]
 Description=Certbot Renewal Service
 After=network-online.target
@@ -324,11 +349,10 @@ Wants=network-online.target
 Type=oneshot
 ExecStart=/usr/bin/certbot renew --quiet --deploy-hook "systemctl reload nginx || systemctl reload apache2 || true"
 EOF
-        close $svc;
-        
-        # Timer file
-        open my $tmr, '>', $timer_file or die "Cannot create timer file: $!\n";
-        print $tmr <<'EOF';
+    close $svc;
+    
+    open my $tmr, '>', $timer_file or die "Cannot create timer file: $!\n";
+    print $tmr <<'EOF';
 [Unit]
 Description=Certbot Renewal Timer
 After=network-online.target
@@ -341,15 +365,13 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
-        close $tmr;
-        
-        # Enable and start timer
-        system("systemctl daemon-reload");
-        system("systemctl enable certbot-renewal.timer");
-        system("systemctl start certbot-renewal.timer");
-        
-        print "${GREEN}✓ Systemd timer created and enabled${NC}\n";
-    }
+    close $tmr;
+    
+    run_cmd("systemctl", "daemon-reload");
+    run_cmd("systemctl", "enable", "certbot-renewal.timer");
+    run_cmd("systemctl", "start", "certbot-renewal.timer");
+    
+    print "${GREEN}✓ Systemd timer created and enabled${NC}\n";
 }
 
 # Set up cron job

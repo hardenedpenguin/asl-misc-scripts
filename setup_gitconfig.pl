@@ -19,6 +19,26 @@
 use strict;
 use warnings;
 
+sub effective_home {
+    if ($< == 0 && $ENV{SUDO_USER}) {
+        my @pw = getpwnam($ENV{SUDO_USER});
+        return $pw[7] if @pw;
+    }
+    return $ENV{HOME} || (getpwuid($<))[7];
+}
+
+sub expand_tilde {
+    my ($path) = @_;
+    return $path unless defined $path && $path =~ /^~/;
+    my $home = effective_home();
+    $path =~ s/^~/$home/;
+    return $path;
+}
+
+if ($< == 0 && !$ENV{SUDO_USER}) {
+    warn "Warning: running as root without sudo; git config will apply to root's account\n";
+}
+
 # Input handle: use /dev/tty when STDIN is piped (e.g. curl | perl)
 my $input_fh = \*STDIN;
 unless (-t STDIN) {
@@ -84,8 +104,7 @@ do {
 print "\n--- Core Settings ---\n";
 $config{editor} = prompt("Preferred editor", "nano");
 $config{excludesfile} = prompt("Global gitignore file path", "~/.gitignore_global");
-my $ignore_path = $config{excludesfile};
-$ignore_path =~ s/^~/$ENV{HOME}/;
+my $ignore_path = expand_tilde($config{excludesfile});
 unless (-f $ignore_path) {
     unless (-e $ignore_path) {
         if (open my $fh, '>', $ignore_path) {

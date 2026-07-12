@@ -262,6 +262,12 @@ def run!(*args)
   abort "ERROR: Command failed: #{args.join(' ')}"
 end
 
+def require_asl3!
+  abort 'ERROR: Not an ASL3 node: /etc/asterisk/rpt.conf missing.' unless File.file?('/etc/asterisk/rpt.conf')
+  abort 'ERROR: Not an ASL3 node: /etc/asterisk/modules.conf missing.' unless File.file?('/etc/asterisk/modules.conf')
+  abort 'ERROR: asterisk not found in PATH.' unless system('command', '-v', 'asterisk', out: File::NULL, err: File::NULL)
+end
+
 def warn_unless_gps_device!(device)
   return if File.exist?(device)
 
@@ -279,7 +285,13 @@ def enable_app_gps!(modules_conf)
             .gsub(/^\s*noload\s*[=:>]+\s*app_gps\.so.*$/i, 'load = app_gps.so                     ; GPS Interface')
 
   if updated == content
-    puts '[WARN] Could not enable app_gps.so automatically; set load = app_gps.so in modules.conf'
+    FileUtils.cp(modules_conf, "#{modules_conf}.bak") if File.exist?(modules_conf)
+    File.open(modules_conf, 'a') do |f|
+      f.puts
+      f.puts '; Added by setup-asl3-gps.rb'
+      f.puts 'load = app_gps.so                     ; GPS Interface'
+    end
+    puts "[OK] Appended load app_gps.so to #{modules_conf}"
     return
   end
 
@@ -503,6 +515,7 @@ def verify_installation!(mobile:)
   notes = []
   if mobile
     notes << 'gpsd-nmea-bridge.service is not active' unless system('systemctl', 'is-active', '--quiet', 'gpsd-nmea-bridge.service')
+    notes << 'gpsd.service is not active' unless system('systemctl', 'is-active', '--quiet', 'gpsd.service')
     notes << "#{RPT_GPS_PTY} is missing" unless File.exist?(RPT_GPS_PTY)
   end
 
@@ -522,6 +535,8 @@ def verify_installation!(mobile:)
 end
 
 abort 'ERROR: This script must be run as root (sudo).' if Process.uid != 0
+
+require_asl3!
 
 input = interactive_input
 

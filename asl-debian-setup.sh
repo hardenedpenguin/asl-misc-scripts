@@ -51,7 +51,6 @@ check_privileges() {
         err "Use: curl -sSL .../asl-debian-setup.sh | sudo sh"
         exit 1
     fi
-    SUDO=""
 }
 
 detect_os() {

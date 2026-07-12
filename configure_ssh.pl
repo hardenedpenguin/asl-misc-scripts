@@ -48,8 +48,20 @@ unless (-t STDIN) {
 
 print "${GREEN}=== SSH Configuration Tool ===${NC}\n\n";
 
+sub effective_home {
+    if ($< == 0 && $ENV{SUDO_USER}) {
+        my @pw = getpwnam($ENV{SUDO_USER});
+        return $pw[7] if @pw;
+    }
+    return $ENV{HOME} || (getpwuid($<))[7];
+}
+
+if ($< == 0 && !$ENV{SUDO_USER}) {
+    print "${YELLOW}Warning: running as root without sudo; configuring /root/.ssh${NC}\n\n";
+}
+
 # Expand home directory
-my $home = $ENV{HOME} || (getpwuid($<))[7];
+my $home = effective_home();
 my $ssh_dir = File::Spec->catdir($home, '.ssh');
 my $config_file = File::Spec->catfile($ssh_dir, 'config');
 

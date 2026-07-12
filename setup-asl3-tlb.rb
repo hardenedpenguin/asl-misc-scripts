@@ -35,6 +35,7 @@ CRON_FILE = '/etc/cron.d/asl3-tlb-keepalive'
 KEEPALIVE_LOG = '/var/log/asterisk/tlb-keepalive.log'
 
 VALID_CODECS = %w[ULAW G726 GSM].freeze
+SUPPORTED_DEBIAN_VERSIONS = [12, 13].freeze
 
 Peer = Struct.new(:priv_node, :remote_call, :remote_ip, :remote_port, :codec, keyword_init: true)
 
@@ -68,6 +69,18 @@ def run!(*args)
   return if system(*args)
 
   abort "ERROR: Command failed: #{args.join(' ')}"
+end
+
+def require_debian!
+  abort 'ERROR: /etc/os-release not found.' unless File.file?('/etc/os-release')
+
+  os_release = File.read('/etc/os-release')
+  abort 'ERROR: Debian 12 or 13 required.' unless os_release.include?('ID=debian')
+
+  major = os_release[/^VERSION_ID="?(\d+)/, 1]&.to_i
+  return if SUPPORTED_DEBIAN_VERSIONS.include?(major)
+
+  abort "ERROR: Unsupported Debian version #{major}. Supported: #{SUPPORTED_DEBIAN_VERSIONS.join(', ')}."
 end
 
 def require_asl3!
@@ -250,18 +263,43 @@ def firewalld_active?
     system('firewall-cmd', '--state', out: File::NULL, err: File::NULL)
 end
 
+def firewalld_port_open?(port)
+  system('firewall-cmd', '--permanent', "--query-port=#{port}/udp", out: File::NULL, err: File::NULL)
+end
+
 def open_firewall!(port)
   rtcp = port + 1
   unless firewalld_active?
-    puts "[WARN] firewalld not running; open UDP #{port} and #{rtcp} manually (e.g. firewall-cmd --permanent --add-port=#{port}/udp)."
+    zone = `firewall-cmd --get-default-zone 2>/dev/null`.strip
+    zone = 'allstarlink' if zone.empty?
+    puts "[WARN] firewalld not running; open UDP #{port} and #{rtcp} in zone #{zone} manually."
     return
   end
 
+  zone = `firewall-cmd --get-default-zone 2>/dev/null`.strip
+  zone = '(default)' if zone.empty?
+  opened = []
+
   [port, rtcp].each do |p|
-    run!('firewall-cmd', '--permanent', "--add-port=#{p}/udp")
+    if firewalld_port_open?(p)
+      puts "[OK] UDP #{p} already open in firewalld (#{zone})."
+    else
+      run!('firewall-cmd', '--permanent', "--add-port=#{p}/udp")
+      opened << p
+    end
   end
-  run!('firewall-cmd', '--reload')
-  puts "[OK] Opened UDP #{port} and #{rtcp} in firewalld (permanent)."
+
+  run!('firewall-cmd', '--reload') unless opened.empty?
+  puts "[OK] Opened UDP #{opened.join(' and ')} in firewalld (#{zone}, permanent)." unless opened.empty?
+end
+
+def verify_tlb_module!
+  output = `asterisk -rx 'module show like tlb' 2>/dev/null`
+  if output.include?('chan_tlb.so') && output.include?('Running')
+    puts '[OK] chan_tlb.so loaded and running.'
+  else
+    puts '[WARN] chan_tlb.so may not be loaded; check: asterisk -rx \'module show like tlb\''
+  end
 end
 
 def install_keepalive_cron!(node:, priv:, hours:)
@@ -346,6 +384,7 @@ end
 
 abort 'ERROR: This script must be run as root (sudo).' if Process.uid != 0
 
+require_debian!
 require_asl3!
 
 node = detect_primary_node
@@ -365,6 +404,13 @@ if noninteractive
   keepalive_priv = ENV['TLB_KEEPALIVE_PRIV'].to_s.strip
   keepalive_priv = peers.first.priv_node if keepalive && keepalive_priv.empty?
   keepalive_hours = (ENV['TLB_KEEPALIVE_HOURS'] || '12').to_i
+
+  print_config_summary(
+    node: node, call: call, port: port, bind_ip: bind_ip, codec: codec,
+    peers: peers, keepalive: keepalive, keepalive_priv: keepalive_priv,
+    keepalive_hours: keepalive_hours
+  )
+  puts '[INFO] Non-interactive mode: applying configuration without confirmation prompt.'
 else
   input = interactive_input
   abort <<~MSG.strip unless input
@@ -428,4 +474,5 @@ if keepalive
 end
 
 restart_asterisk!
+verify_tlb_module!
 print_summary(node: node, call: call, port: port, peers: peers, keepalive: keepalive)

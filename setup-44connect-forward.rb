@@ -38,6 +38,7 @@ require 'securerandom'
 CONFIG_PATH = '/etc/44connect-forwards.json'
 APPLY_BIN = '/usr/local/sbin/44connect-forward-apply'
 INSTALLED_SCRIPT = '/usr/local/sbin/setup-44connect-forward.rb'
+INSTALL_SOURCE_URL = 'https://raw.githubusercontent.com/hardenedpenguin/asl-misc-scripts/refs/heads/main/setup-44connect-forward.rb'
 SYSCTL_DROPIN = '/etc/sysctl.d/99-44connect-forward.conf'
 DEFAULT_FIREWALL_ZONE = 'allstarlink'
 SUPPORTED_DEBIAN_VERSIONS = [12, 13].freeze
@@ -210,6 +211,31 @@ def forward_port_spec(fwd)
   "port=#{fwd['external_port']}:proto=#{fwd['protocol']}:toport=#{fwd['internal_port']}:toaddr=#{fwd['internal_host']}"
 end
 
+def forward_exists?(forwards, proto, ext_port)
+  forwards.any? { |f| f['protocol'] == proto && f['external_port'].to_i == ext_port.to_i }
+end
+
+def validate_ampr_ip!(ip)
+  validate_ipv4!('AMPR IP', ip)
+  abort "ERROR: #{ip} is not in 44.0.0.0/8" unless ampr_addr?(ip)
+end
+
+def append_forward!(config, proto:, ext_port:, int_ip:, int_port:, description: nil)
+  config['forwards'] ||= []
+  if forward_exists?(config['forwards'], proto, ext_port)
+    abort "ERROR: Forward already exists for #{proto}/#{ext_port}"
+  end
+
+  config['forwards'] << {
+    'id' => SecureRandom.hex(4),
+    'protocol' => proto,
+    'external_port' => ext_port.to_i,
+    'internal_host' => int_ip,
+    'internal_port' => int_port.to_i,
+    'description' => description
+  }.compact
+end
+
 def default_firewall_zone
   zones = `firewall-cmd --get-zones 2>/dev/null`.split
   return DEFAULT_FIREWALL_ZONE if zones.include?(DEFAULT_FIREWALL_ZONE)
@@ -286,11 +312,22 @@ def apply_forwards!(config)
   puts "[OK] Applied #{forwards.length} port forward(s) in firewalld zone #{zone}."
 end
 
-def install_apply_helper!
+def install_script_copy!
   if File.file?(__FILE__) && !__FILE__.start_with?('-')
     FileUtils.cp(__FILE__, INSTALLED_SCRIPT)
-    File.chmod(0o755, INSTALLED_SCRIPT)
+  elsif system('curl', '-sSLf', '-o', INSTALLED_SCRIPT, INSTALL_SOURCE_URL)
+    puts "[OK] Saved #{INSTALLED_SCRIPT} from repository (required for curl | sudo ruby)."
+  else
+    puts "[WARN] Could not save #{INSTALLED_SCRIPT}; add WireGuard PostDown manually after saving a local copy."
+    return false
   end
+
+  File.chmod(0o755, INSTALLED_SCRIPT)
+  true
+end
+
+def install_apply_helper!
+  install_script_copy!
 
   File.write(APPLY_BIN, <<~SH)
     #!/bin/sh
@@ -314,6 +351,8 @@ def flush_forwards!(config = load_config)
     remove_forward_port!(zone, spec)
   end
   run!('firewall-cmd', '--reload')
+  config['applied_forward_specs'] = []
+  save_config!(config)
   puts '[OK] Removed 44Connect forward-port rules from firewalld.'
 end
 
@@ -370,11 +409,11 @@ def configure_interfaces!(input, config)
     config['ampr_ip'] ||= pick_interface(input, 'AMPR IPv4', ampr_candidates, default: ampr_candidates.first)
   end
 
-  validate_ipv4!('AMPR IP', config['ampr_ip'])
-  abort "ERROR: #{config['ampr_ip']} is not in 44.0.0.0/8" unless ampr_addr?(config['ampr_ip'])
+  validate_ampr_ip!(config['ampr_ip'])
 
   lan_default = guess_lan_interface(config['wg_interface'])
-  config['lan_interface'] ||= ask(input, 'LAN interface toward internal devices', default: lan_default || 'eth0')
+  config['lan_interface'] ||= ask(input, 'LAN interface toward internal devices (documentation; not used in firewalld rules)',
+                                  default: lan_default || 'eth0')
 end
 
 def add_forward_interactive!(input, config)
@@ -390,19 +429,8 @@ def add_forward_interactive!(input, config)
   validate_port!('internal port', int_port)
   validate_ipv4!('internal host', int_ip)
 
-  config['forwards'] ||= []
-  if config['forwards'].any? { |f| f['protocol'] == proto && f['external_port'].to_i == ext_port.to_i }
-    abort "ERROR: Forward already exists for #{proto}/#{ext_port}"
-  end
-
-  config['forwards'] << {
-    'id' => SecureRandom.hex(4),
-    'protocol' => proto,
-    'external_port' => ext_port.to_i,
-    'internal_host' => int_ip,
-    'internal_port' => int_port.to_i,
-    'description' => desc.empty? ? nil : desc
-  }.compact
+  append_forward!(config, proto: proto, ext_port: ext_port, int_ip: int_ip, int_port: int_port,
+                  description: desc.empty? ? nil : desc)
 
   apply_forwards!(config)
   list_forwards(config)
@@ -433,18 +461,11 @@ def add_forward_from_env!(config)
 
   validate_port!('external port', ext_port)
   validate_port!('internal port', int_port)
-  validate_ipv4!('AMPR IP', config['ampr_ip'])
+  validate_ampr_ip!(config['ampr_ip'])
   validate_ipv4!('internal host', int_ip)
 
-  config['forwards'] ||= []
-  config['forwards'] << {
-    'id' => SecureRandom.hex(4),
-    'protocol' => proto,
-    'external_port' => ext_port.to_i,
-    'internal_host' => int_ip,
-    'internal_port' => int_port.to_i,
-    'description' => ENV['FWD_DESC']
-  }.compact
+  append_forward!(config, proto: proto, ext_port: ext_port, int_ip: int_ip, int_port: int_port,
+                  description: ENV['FWD_DESC'])
 
   apply_forwards!(config)
   list_forwards(config)

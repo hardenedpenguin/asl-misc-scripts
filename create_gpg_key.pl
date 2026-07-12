@@ -53,6 +53,20 @@ unless (system('which gpg > /dev/null 2>&1') == 0) {
     die "Error: gpg is not installed. Please install it with: sudo apt-get install gnupg\n";
 }
 
+sub effective_home {
+    if ($< == 0 && $ENV{SUDO_USER}) {
+        my @pw = getpwnam($ENV{SUDO_USER});
+        return $pw[7] if @pw;
+    }
+    return $ENV{HOME} || (getpwuid($<))[7];
+}
+
+if ($< == 0 && !$ENV{SUDO_USER}) {
+    warn "Warning: running as root without sudo; GPG key will be created in /root/.gnupg\n";
+}
+
+my $effective_home = effective_home();
+
 # Require interactive terminal (fails when piped: curl | perl)
 my $input_fh = \*STDIN;
 unless (-t STDIN) {
@@ -138,7 +152,7 @@ close $fh;
 chmod 0600, $batch_file;
 
 # Ensure .gnupg directory exists with proper permissions
-my $gnupg_dir = $ENV{HOME} . '/.gnupg';
+my $gnupg_dir = $effective_home . '/.gnupg';
 unless (-d $gnupg_dir) {
     mkdir $gnupg_dir or die "Error: Cannot create .gnupg directory: $!\n";
 }

@@ -12,6 +12,22 @@ Copyright © 2026 Jory A. Pratt, W5GLE
 
 Run directly from GitHub with curl. Copy the line for the script you need.
 
+| Script | Root | ASL3 | Experimental | Notes |
+|--------|------|------|--------------|-------|
+| `asl-debian-setup.sh` | yes | — | no | Debian 12/13 repo + optional install |
+| `setup-asl3-gps.rb` | yes | yes | no | Interactive APRS setup |
+| `check-asl3-gps.rb` | no* | yes | no | Read-only diagnostic (*sudo helps for services) |
+| `setup-asl3-tlb.rb` | yes | yes | **yes** | TheLinkBox / chan_tlb |
+| `setup-44connect-forward.rb` | yes | yes | **yes** | 44Net firewalld forwards |
+| `setup_ssh_key.pl` | no | — | no | Run as your user, not root |
+| `setup_gitconfig.pl` | no | — | no | Run as your user |
+| `configure_ssh.pl` | no | — | no | Run as your user |
+| `create_gpg_key.pl` | no | — | no | Run as your user |
+| `setup_certbot.pl` | yes | — | no | Let's Encrypt |
+| `cleanup_old_logs.rb` | yes† | — | no | †sudo for protected logs |
+
+**Do not** run the Perl user tools (`setup_gitconfig`, `configure_ssh`, `create_gpg_key`, `setup_ssh_key`) as bare `root` — use your normal account, or `sudo -u $USER` so files land in your home directory.
+
 ### asl-debian-setup.sh
 
 ```sh
@@ -79,6 +95,14 @@ asterisk -rx 'gps show status'
 
 Mobile: `cgps -s` and `ls -l /dev/rptgps`. Map: `https://aprs.fi/#!call=YOURCALL-SSID`
 
+### check-asl3-gps.rb
+
+```sh
+curl -sSL https://raw.githubusercontent.com/hardenedpenguin/asl-misc-scripts/refs/heads/main/check-asl3-gps.rb | ruby
+```
+
+Read-only diagnostic for APRS/GPS on an ASL3 node: `gps.conf`, `app_gps` module state, `gps show status`, and (when configured) gpsd, the NMEA bridge, and `/dev/rptgps`. Exits non-zero if critical issues are found. Safe to run anytime; does not change configuration.
+
 ### setup-asl3-tlb.rb
 
 > **Experimental and untested.** New script; not yet validated on production ASL3 nodes. Review generated config and test on a non-critical system first.
@@ -94,7 +118,7 @@ Interactive setup for **TheLinkBox (chan_tlb)** on an ASL3 node. TLB bridges All
 - Enables `load => chan_tlb.so` in `/etc/asterisk/modules.conf`
 - Writes `/etc/asterisk/tlb.conf` (`[tlb0]` + remote `[nodes]` peers)
 - Backs up prior config under `/var/asl-backups/tlb-setup/`
-- Opens UDP ports in **firewalld** when active (RTP + RTCP pair; permanent rules)
+- Opens UDP ports in **firewalld** default zone when active (on ASL3 this is usually `allstarlink`; permanent rules, idempotent re-runs)
 - Optionally installs a periodic disconnect/reconnect cron (stability workaround reported on [community.allstarlink.org](https://community.allstarlink.org/t/tlb-conf-configuration/23504))
 - Restarts Asterisk
 
@@ -130,6 +154,7 @@ Interactive **firewalld** port-forward setup for [44Net Connect](https://44net.c
 - Stores forwards in `/etc/44connect-forwards.json`
 - Adds **firewalld** `forward-port` rules on the WireGuard interface zone (masquerade + `net.ipv4.ip_forward`)
 - Assigns the WireGuard interface to the `allstarlink` firewalld zone if unassigned (ASL3 default; falls back to the system default zone)
+- Saves a copy of this script to `/usr/local/sbin/` when run via curl (for WireGuard PostDown hooks)
 - Installs `/usr/local/sbin/44connect-forward-apply` for WireGuard `PostUp` hooks
 
 **Requirements:** Debian Bookworm (12) or Trixie (13), `firewalld` running, WireGuard up with a 44net address. Ensure your LAN router sends `44.0.0.0/9` and `44.128.0.0/10` toward this host.
@@ -196,3 +221,9 @@ curl -sSL https://raw.githubusercontent.com/hardenedpenguin/asl-misc-scripts/ref
 ```
 
 Deletes **regular files** under `/var/log` whose modification time is older than three days (default). Directories, symlinks, and other non-file entries are left alone; `/var/log/journal` is excluded by default. Use `--dry-run` to preview, `--days N` to change retention, and `--exclude PATH` for additional skip paths. Exits non-zero if permission errors occur. Run with `sudo` when you need permission to remove protected logs. Intended for periodic maintenance (for example from cron), not for interactive confirmation.
+
+Preview first:
+
+```sh
+curl -sSL https://raw.githubusercontent.com/hardenedpenguin/asl-misc-scripts/refs/heads/main/cleanup_old_logs.rb | sudo ruby -- --dry-run
+```
