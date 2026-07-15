@@ -16,6 +16,7 @@ Run directly from GitHub with curl. Copy the line for the script you need.
 |--------|------|------|--------------|-------|
 | `asl-debian-setup.sh` | yes | — | no | Debian 12/13 repo + optional install |
 | `setup-asl3-gps.rb` | yes | yes | no | Interactive APRS setup |
+| `gpsd-nmea-bridge` | — | yes | no | Installed to `/usr/local/sbin` by setup script |
 | `check-asl3-gps.rb` | yes | yes | no | Read-only APRS/GPS diagnostic |
 | `setup-asl3-tlb.rb` | yes | yes | **yes** | TheLinkBox / chan_tlb |
 | `setup-44connect-forward.rb` | yes | yes | **yes** | 44Net firewalld forwards |
@@ -65,7 +66,9 @@ Both modes support **radioless** nodes (hubs, links, GPS-only trackers): skip RF
 
 - Installs `gpsd`, `gpsd-clients`, and `socat` if missing
 - `/etc/default/gpsd` — USB device (default `/dev/ttyACM0`)
+- `/usr/local/sbin/gpsd-nmea-bridge` — bridge helper (written by the setup script; also kept as a repo file for review)
 - `gpsd-nmea-bridge.service` — replays NMEA to `/dev/rptgps` (because `app_gps` reads a serial stream, not gpsd directly)
+- Asterisk waits for `/dev/rptgps` before starting, avoiding transient `Cannot open serial port` log spam on restart
 - Shared GPS on `127.0.0.1:2947` for saytime, SkywarnPlus-NG, `cgps`, and similar clients
 - Adds `asterisk` to group `dialout` if needed; Asterisk starts after the bridge on boot
 

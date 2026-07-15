@@ -26,6 +26,8 @@
 require 'fileutils'
 
 GPSD_NMEA_BRIDGE_UNIT = '/etc/systemd/system/gpsd-nmea-bridge.service'
+GPSD_NMEA_BRIDGE_SCRIPT = '/usr/local/sbin/gpsd-nmea-bridge'
+ASTERISK_GPS_BRIDGE_DROPIN = '/etc/systemd/system/asterisk.service.d/gps-bridge.conf'
 RPT_GPS_PTY = '/dev/rptgps'
 GPSD_USB_BAUD = 115_200
 APP_GPS_BAUD = 4800
@@ -300,7 +302,22 @@ def enable_app_gps!(modules_conf)
   puts "[OK] Enabled app_gps.so in #{modules_conf}"
 end
 
+def gpsd_nmea_bridge_script_body
+  # curl | ruby has no sibling files; use the __END__ payload bundled in this script.
+  repo_script = File.expand_path('gpsd-nmea-bridge', File.dirname($PROGRAM_NAME))
+  return File.read(repo_script) if $PROGRAM_NAME != '-' && File.file?(repo_script)
+
+  body = DATA.read
+  abort 'ERROR: gpsd-nmea-bridge payload missing from setup-asl3-gps.rb' if body.strip.empty?
+
+  body
+end
+
 def install_gpsd_nmea_bridge!
+  FileUtils.mkdir_p(File.dirname(GPSD_NMEA_BRIDGE_SCRIPT))
+  File.write(GPSD_NMEA_BRIDGE_SCRIPT, gpsd_nmea_bridge_script_body)
+  File.chmod(0o755, GPSD_NMEA_BRIDGE_SCRIPT)
+
   unit = <<~UNIT
     [Unit]
     Description=Replay gpsd NMEA to #{RPT_GPS_PTY} for app_gps
@@ -311,10 +328,12 @@ def install_gpsd_nmea_bridge!
 
     [Service]
     Type=simple
+    RuntimeDirectory=gpsd-nmea-bridge
+    RuntimeDirectoryMode=0755
     Restart=always
-    RestartSec=5
-    ExecStartPre=-/bin/rm -f #{RPT_GPS_PTY}
-    ExecStart=/bin/sh -c 'exec /usr/bin/gpspipe -r | /usr/bin/socat - PTY,link=#{RPT_GPS_PTY},raw,echo=0,group=dialout,mode=660,waitslave'
+    RestartSec=1
+    ExecStart=#{GPSD_NMEA_BRIDGE_SCRIPT}
+    ExecStartPost=/bin/bash -c 'for i in $(seq 1 50); do [ -e #{RPT_GPS_PTY} ] && exit 0; sleep 0.1; done; echo "timed out waiting for #{RPT_GPS_PTY}"; exit 1'
 
     [Install]
     WantedBy=multi-user.target
@@ -324,20 +343,21 @@ def install_gpsd_nmea_bridge!
   run!('systemctl', 'daemon-reload')
   run!('systemctl', 'enable', 'gpsd-nmea-bridge.service')
   run!('systemctl', 'restart', 'gpsd-nmea-bridge.service')
-  puts "[OK] Installed gpsd NMEA bridge -> #{RPT_GPS_PTY}"
+  puts "[OK] Installed gpsd NMEA bridge -> #{RPT_GPS_PTY} via #{GPSD_NMEA_BRIDGE_SCRIPT}"
 end
 
 def install_asterisk_after_gps_bridge!
-  dir = '/etc/systemd/system/asterisk.service.d'
-  dropin = File.join(dir, 'gps-bridge.conf')
-  FileUtils.mkdir_p(dir)
-  File.write(dropin, <<~DROPIN)
+  FileUtils.mkdir_p(File.dirname(ASTERISK_GPS_BRIDGE_DROPIN))
+  File.write(ASTERISK_GPS_BRIDGE_DROPIN, <<~DROPIN)
     [Unit]
     After=gpsd-nmea-bridge.service
-    Wants=gpsd-nmea-bridge.service
+    Requires=gpsd-nmea-bridge.service
+
+    [Service]
+    ExecStartPre=/bin/bash -c 'for i in $(seq 1 30); do [ -e #{RPT_GPS_PTY} ] && exit 0; sleep 1; done; echo "asterisk: #{RPT_GPS_PTY} not ready"; exit 1'
   DROPIN
   run!('systemctl', 'daemon-reload')
-  puts '[OK] Asterisk will start after gpsd NMEA bridge on boot.'
+  puts '[OK] Asterisk will wait for gpsd NMEA bridge before starting.'
 end
 
 def wait_for_rptgps!(timeout_sec: 15)
@@ -707,3 +727,55 @@ end
 puts "4. Map: https://aprs.fi/#!call=#{full_callsign}"
 puts '   (Allow a few minutes for the first beacon.)'
 puts '===================================================='
+
+__END__
+#!/bin/bash
+# Replay gpsd NMEA to /dev/rptgps for app_gps.
+#
+# Copyright (C) 2026 Jory A. Pratt, W5GLE <geekypenguin@gmail.com>
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# Decouple gpspipe from socat so a dropped PTY reader does not tear down the
+# whole bridge, and recreate /dev/rptgps quickly when socat must restart.
+set -euo pipefail
+
+RUNDIR=/run/gpsd-nmea-bridge
+FIFO="${RUNDIR}/nmea.pipe"
+PTYLINK=/dev/rptgps
+
+install -d -m 0755 "$RUNDIR"
+rm -f "$FIFO"
+mkfifo -m 0660 "$FIFO"
+chgrp dialout "$FIFO" 2>/dev/null || true
+
+cleanup() {
+	local pids
+
+	pids=$(jobs -p 2>/dev/null || true)
+	if [ -n "${pids}" ]; then
+		kill ${pids} 2>/dev/null || true
+	fi
+	wait 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+# Keep feeding NMEA even if the PTY bridge restarts.
+(
+	while true; do
+		gpspipe -r 2>/dev/null >"${FIFO}" || true
+		sleep 1
+	done
+) &
+
+while true; do
+	rm -f "${PTYLINK}"
+	socat \
+		"OPEN:${FIFO},ignoreeof" \
+		"PTY,link=${PTYLINK},raw,echo=0,group=dialout,mode=660,waitslave" \
+		|| true
+	sleep 0.2
+done

@@ -14,6 +14,8 @@ GPS_CONF = '/etc/asterisk/gps.conf'
 MODULES_CONF = '/etc/asterisk/modules.conf'
 RPT_GPS_PTY = '/dev/rptgps'
 BRIDGE_UNIT = 'gpsd-nmea-bridge.service'
+BRIDGE_SCRIPT = '/usr/local/sbin/gpsd-nmea-bridge'
+ASTERISK_GPS_BRIDGE_DROPIN = '/etc/systemd/system/asterisk.service.d/gps-bridge.conf'
 
 def ok(msg) = puts "[OK] #{msg}"
 def warn(msg) = puts "[WARN] #{msg}"
@@ -144,11 +146,40 @@ if mobile || File.file?("/etc/systemd/system/#{BRIDGE_UNIT}")
     if service_active?(BRIDGE_UNIT)
       ok "#{BRIDGE_UNIT} active"
     else
-      fail "#{BRIDGE_UNIT} not active (common cause: gpspipe broken pipe)"
+      fail "#{BRIDGE_UNIT} not active (check: systemctl status #{BRIDGE_UNIT})"
       issues += 1
+    end
+
+    unit = File.read("/etc/systemd/system/#{BRIDGE_UNIT}")
+    if unit.include?('gpspipe -r |') || unit.include?('ExecStartPre=-/bin/rm -f /dev/rptgps')
+      warn "#{BRIDGE_UNIT} uses the legacy inline gpspipe|socat unit; re-run setup-asl3-gps.rb mobile setup to upgrade"
+      warns += 1
+    elsif !unit.include?(BRIDGE_SCRIPT)
+      warn "#{BRIDGE_UNIT} does not reference #{BRIDGE_SCRIPT}"
+      warns += 1
     end
   else
     warn "#{BRIDGE_UNIT} unit file missing"
+    warns += 1
+  end
+
+  if File.executable?(BRIDGE_SCRIPT)
+    ok "#{BRIDGE_SCRIPT} installed"
+  else
+    warn "#{BRIDGE_SCRIPT} missing or not executable"
+    warns += 1
+  end
+
+  if File.file?(ASTERISK_GPS_BRIDGE_DROPIN)
+    dropin = File.read(ASTERISK_GPS_BRIDGE_DROPIN)
+    if dropin.include?('Requires=gpsd-nmea-bridge.service') && dropin.include?(RPT_GPS_PTY)
+      ok 'Asterisk gps-bridge drop-in waits for /dev/rptgps'
+    else
+      warn "#{ASTERISK_GPS_BRIDGE_DROPIN} is present but looks outdated; re-run setup-asl3-gps.rb mobile setup"
+      warns += 1
+    end
+  else
+    warn "#{ASTERISK_GPS_BRIDGE_DROPIN} missing (Asterisk may start before /dev/rptgps exists)"
     warns += 1
   end
 

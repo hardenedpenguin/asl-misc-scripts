@@ -1,0 +1,50 @@
+#!/bin/bash
+# Replay gpsd NMEA to /dev/rptgps for app_gps.
+#
+# Copyright (C) 2026 Jory A. Pratt, W5GLE <geekypenguin@gmail.com>
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# Decouple gpspipe from socat so a dropped PTY reader does not tear down the
+# whole bridge, and recreate /dev/rptgps quickly when socat must restart.
+set -euo pipefail
+
+RUNDIR=/run/gpsd-nmea-bridge
+FIFO="${RUNDIR}/nmea.pipe"
+PTYLINK=/dev/rptgps
+
+install -d -m 0755 "$RUNDIR"
+rm -f "$FIFO"
+mkfifo -m 0660 "$FIFO"
+chgrp dialout "$FIFO" 2>/dev/null || true
+
+cleanup() {
+	local pids
+
+	pids=$(jobs -p 2>/dev/null || true)
+	if [ -n "${pids}" ]; then
+		kill ${pids} 2>/dev/null || true
+	fi
+	wait 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+# Keep feeding NMEA even if the PTY bridge restarts.
+(
+	while true; do
+		gpspipe -r 2>/dev/null >"${FIFO}" || true
+		sleep 1
+	done
+) &
+
+while true; do
+	rm -f "${PTYLINK}"
+	socat \
+		"OPEN:${FIFO},ignoreeof" \
+		"PTY,link=${PTYLINK},raw,echo=0,group=dialout,mode=660,waitslave" \
+		|| true
+	sleep 0.2
+done
