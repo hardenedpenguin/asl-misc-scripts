@@ -26,6 +26,8 @@ Run directly from GitHub with curl. Copy the line for the script you need.
 | `create_gpg_key.pl` | no | — | no | Run as your user |
 | `setup_certbot.pl` | yes | — | no | Let's Encrypt |
 | `cleanup_old_logs.rb` | yes† | — | no | †sudo for protected logs |
+| `fasterAsteriskSounds.sh` | yes | yes | no | Speed up stock prompts into custom sounds dir |
+| `write_node_callsigns.sh` | yes | yes | no | Speak callsigns instead of node numbers |
 
 **Do not** run the Perl user tools (`setup_gitconfig`, `configure_ssh`, `create_gpg_key`, `setup_ssh_key`) as bare `root` — use your normal account, or `sudo -u $USER` so files land in your home directory.
 
@@ -230,3 +232,53 @@ Preview first:
 ```sh
 curl -sSL https://raw.githubusercontent.com/hardenedpenguin/asl-misc-scripts/refs/heads/main/cleanup_old_logs.rb | sudo ruby -- --dry-run
 ```
+
+### fasterAsteriskSounds.sh
+
+```sh
+curl -sSL https://raw.githubusercontent.com/hardenedpenguin/asl-misc-scripts/refs/heads/main/fasterAsteriskSounds.sh | sudo bash
+```
+
+Speeds up stock Asterisk English prompts (default **1.1×** tempo) and writes overrides under `/usr/local/share/asterisk/sounds` so package upgrades of `/usr/share/asterisk/sounds/en` are never overwritten. ASL3 plays these first when `sounds_search_custom_dir = yes` (default).
+
+**Requires:** `sox`, root (or write access to `DEST_DIR`).
+
+**Options:**
+
+| Flag / env | Purpose |
+|------------|---------|
+| `--dry-run` | Count files without writing |
+| `--tempo N` | Tempo multiplier (default `1.1`) |
+| `--no-silence` | Skip leading/trailing silence trim |
+| `SOURCE_DIR` / `DEST_DIR` | Override input/output trees |
+
+Preview:
+
+```sh
+curl -sSL https://raw.githubusercontent.com/hardenedpenguin/asl-misc-scripts/refs/heads/main/fasterAsteriskSounds.sh | sudo bash -s -- --dry-run
+```
+
+### write_node_callsigns.sh
+
+```sh
+curl -sSL https://raw.githubusercontent.com/hardenedpenguin/asl-misc-scripts/refs/heads/main/write_node_callsigns.sh | sudo bash
+```
+
+Builds per-node `.gsm` prompts so app_rpt telemetry speaks **callsigns** instead of node numbers (original by N5LSN; parallel/resume updates for ASL3). Reads `astdb.txt` from `/var/lib/asterisk` or `/var/log/asterisk` and writes under `/usr/share/asterisk/sounds/en/rpt/nodenames`.
+
+**Requires:** `sox`, ASL3 sound letter/digit files, root for the default destination.
+
+**Common usage:**
+
+```sh
+# First full build (no prompt)
+curl -sSL https://raw.githubusercontent.com/hardenedpenguin/asl-misc-scripts/refs/heads/main/write_node_callsigns.sh | sudo bash -s -- -a -f
+
+# Only new/changed nodes
+curl -sSL https://raw.githubusercontent.com/hardenedpenguin/asl-misc-scripts/refs/heads/main/write_node_callsigns.sh | sudo bash -s -- -f
+
+# Rebuild one node
+curl -sSL https://raw.githubusercontent.com/hardenedpenguin/asl-misc-scripts/refs/heads/main/write_node_callsigns.sh | sudo bash -s -- -n 40000 -r
+```
+
+Useful flags: `-j N` (parallel sox jobs), `-i` (append “node” + number after callsign), `-r` (force regenerate), `-v` (verbose), `-d PATH` / `-s PATH` (custom dest / astdb dir).
