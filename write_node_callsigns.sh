@@ -14,6 +14,7 @@
 #   - Durable previous-db beside astdb.txt (not /tmp)
 #   - Auto-locate astdb in /var/lib/asterisk or /var/log/asterisk
 #   - Fixed -a / -n / -i / -v; added -j, -r, -s, -p
+#   - Map punctuation (. / \ + * @ space) without breaking AUDIO_MAP_$char
 
 set -euo pipefail
 
@@ -95,7 +96,8 @@ resolve_audio() {
 }
 
 # Cache letter/digit paths into exported env vars for parallel workers.
-# Keys: AUDIO_MAP_0..9, AUDIO_MAP_a..z, AUDIO_MAP_SLASH, AUDIO_MAP_DASH
+# Keys: AUDIO_MAP_0..9, AUDIO_MAP_a..z, plus named punctuation keys.
+# Never use punctuation as part of an env var name (e.g. AUDIO_MAP_\ breaks bash).
 build_audio_cache() {
     local c file
     for c in {0..9}; do
@@ -108,6 +110,8 @@ build_audio_cache() {
         [[ -n "$file" ]] || die "Missing letter audio for '$c' under $LETTERS"
         export "AUDIO_MAP_$c=$file"
     done
+
+    # Required punctuation used in ASL callsigns / astdb entries
     file="$(resolve_audio "$LETTERS/slash")"
     [[ -n "$file" ]] || die "Missing slash audio under $LETTERS"
     export AUDIO_MAP_SLASH="$file"
@@ -115,6 +119,27 @@ build_audio_cache() {
     file="$(resolve_audio "$LETTERS/dash")"
     [[ -n "$file" ]] || die "Missing dash audio under $LETTERS"
     export AUDIO_MAP_DASH="$file"
+
+    file="$(resolve_audio "$LETTERS/dot")"
+    [[ -n "$file" ]] || die "Missing dot audio under $LETTERS"
+    export AUDIO_MAP_DOT="$file"
+
+    # Optional: backslash (ASCII 92) appears in some astdb callsigns
+    file="$(resolve_audio "$LETTERS/ascii92")"
+    if [[ -z "$file" ]]; then
+        file="$(resolve_audio "$LETTERS/slash")"
+    fi
+    export AUDIO_MAP_BACKSLASH="$file"
+
+    # Optional extras when present on the system
+    file="$(resolve_audio "$LETTERS/plus")"
+    [[ -n "$file" ]] && export AUDIO_MAP_PLUS="$file"
+    file="$(resolve_audio "$LETTERS/asterisk")"
+    [[ -n "$file" ]] && export AUDIO_MAP_ASTERISK="$file"
+    file="$(resolve_audio "$LETTERS/at")"
+    [[ -n "$file" ]] && export AUDIO_MAP_AT="$file"
+    file="$(resolve_audio "$LETTERS/space")"
+    [[ -n "$file" ]] && export AUDIO_MAP_SPACE="$file"
 
     if (( INCNODE )); then
         NODE_SOUND="$(resolve_audio "$RPTSOUNDS/node")"
@@ -125,10 +150,25 @@ build_audio_cache() {
 }
 
 audio_lookup() {
+    # Punctuation must be handled before AUDIO_MAP_$1 — chars like \ . break
+    # indirect variable expansion ("AUDIO_MAP_" / invalid names).
     case "$1" in
         /) printf '%s' "${AUDIO_MAP_SLASH-}" ;;
         -) printf '%s' "${AUDIO_MAP_DASH-}" ;;
-        *) local var="AUDIO_MAP_$1"; printf '%s' "${!var-}" ;;
+        .) printf '%s' "${AUDIO_MAP_DOT-}" ;;
+        \\) printf '%s' "${AUDIO_MAP_BACKSLASH-}" ;;
+        +) printf '%s' "${AUDIO_MAP_PLUS-}" ;;
+        \*) printf '%s' "${AUDIO_MAP_ASTERISK-}" ;;
+        @) printf '%s' "${AUDIO_MAP_AT-}" ;;
+        ' ') printf '%s' "${AUDIO_MAP_SPACE-}" ;;
+        [0-9a-z])
+            local var="AUDIO_MAP_$1"
+            printf '%s' "${!var-}"
+            ;;
+        *)
+            # Unknown character: no mapping (caller reports the node)
+            printf '%s' ''
+            ;;
     esac
 }
 
