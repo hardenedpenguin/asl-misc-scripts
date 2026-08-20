@@ -264,10 +264,43 @@ def run!(*args)
   abort "ERROR: Command failed: #{args.join(' ')}"
 end
 
+def asterisk_binary
+  candidates = %w[
+    /usr/sbin/asterisk
+    /usr/bin/asterisk
+    /usr/local/sbin/asterisk
+    /usr/local/bin/asterisk
+  ]
+  found = candidates.find { |path| File.executable?(path) }
+  return found if found
+
+  path_dirs = ENV.fetch('PATH', '').split(':') + %w[/usr/sbin /sbin]
+  path_dirs.uniq.each do |dir|
+    candidate = File.join(dir, 'asterisk')
+    return candidate if File.executable?(candidate)
+  end
+  nil
+end
+
 def require_asl3!
   abort 'ERROR: Not an ASL3 node: /etc/asterisk/rpt.conf missing.' unless File.file?('/etc/asterisk/rpt.conf')
   abort 'ERROR: Not an ASL3 node: /etc/asterisk/modules.conf missing.' unless File.file?('/etc/asterisk/modules.conf')
-  abort 'ERROR: asterisk not found in PATH.' unless system('command', '-v', 'asterisk', out: File::NULL, err: File::NULL)
+  abort 'ERROR: asterisk not found (expected /usr/sbin/asterisk).' if asterisk_binary.nil?
+end
+
+def package_installed?(pkg)
+  `dpkg-query -W -f='${Status}' #{pkg} 2>/dev/null`.include?('install ok installed')
+end
+
+def ensure_packages!(*packages)
+  missing = packages.reject { |pkg| package_installed?(pkg) }
+  return if missing.empty?
+
+  puts "\n--- Installing packages: #{missing.join(' ')} ---"
+  unless system('env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get', 'update', '-qq') &&
+         system('env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get', 'install', '-y', '--no-install-recommends', *missing)
+    abort 'ERROR: Package installation failed.'
+  end
 end
 
 def warn_unless_gps_device!(device)
@@ -383,11 +416,8 @@ def ensure_asterisk_dialout!
 end
 
 def setup_mobile_gps!(gps_device)
-  puts "\n--- System update & package installation ---"
-  unless system('env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get', 'update') &&
-         system('env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get', 'install', '-y', 'gpsd', 'gpsd-clients', 'socat')
-    abort 'ERROR: Package installation failed.'
-  end
+  # Bridge path needs: gpsd (daemon), gpsd-clients (gpspipe), socat (PTY).
+  ensure_packages!('gpsd', 'gpsd-clients', 'socat')
 
   puts "\n--- Writing /etc/default/gpsd ---"
   File.write('/etc/default/gpsd', <<~GPSD)
@@ -539,7 +569,7 @@ def verify_installation!(mobile:)
     notes << "#{RPT_GPS_PTY} is missing" unless File.exist?(RPT_GPS_PTY)
   end
 
-  gps_status = `asterisk -rx 'gps show status' 2>/dev/null`
+  gps_status = `#{asterisk_binary} -rx 'gps show status' 2>/dev/null`
   if gps_status.include?('Locked')
     puts '[OK] Post-install: GPS locked in Asterisk.'
   elsif mobile && gps_status.include?('Unlocked')

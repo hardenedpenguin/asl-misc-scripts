@@ -16,6 +16,7 @@ RPT_GPS_PTY = '/dev/rptgps'
 BRIDGE_UNIT = 'gpsd-nmea-bridge.service'
 BRIDGE_SCRIPT = '/usr/local/sbin/gpsd-nmea-bridge'
 ASTERISK_GPS_BRIDGE_DROPIN = '/etc/systemd/system/asterisk.service.d/gps-bridge.conf'
+APP_GPS_BAUD = '4800'
 
 def ok(msg) = puts "[OK] #{msg}"
 def warn(msg) = puts "[WARN] #{msg}"
@@ -23,6 +24,24 @@ def fail(msg) = puts "[FAIL] #{msg}"
 
 def service_active?(unit)
   system('systemctl', 'is-active', '--quiet', unit)
+end
+
+def asterisk_binary
+  candidates = %w[
+    /usr/sbin/asterisk
+    /usr/bin/asterisk
+    /usr/local/sbin/asterisk
+    /usr/local/bin/asterisk
+  ]
+  found = candidates.find { |path| File.executable?(path) }
+  return found if found
+
+  path_dirs = ENV.fetch('PATH', '').split(':') + %w[/usr/sbin /sbin]
+  path_dirs.uniq.each do |dir|
+    candidate = File.join(dir, 'asterisk')
+    return candidate if File.executable?(candidate)
+  end
+  nil
 end
 
 def read_gps_conf
@@ -35,13 +54,18 @@ def read_gps_conf
     key, value = line.split('=', 2)
     next unless key && value
 
-    conf[key.strip.downcase] = value.strip.delete(';')
+    # Strip inline comments (value ; comment) and surrounding whitespace
+    value = value.split(';', 2).first.to_s.strip
+    conf[key.strip.downcase] = value
   end
   conf
 end
 
 def asterisk_command(cmd)
-  output = `asterisk -rx #{cmd} 2>&1`.strip
+  bin = asterisk_binary
+  return ['', false] if bin.nil?
+
+  output = `#{bin} -rx #{cmd} 2>&1`.strip
   [output, $?.success?]
 end
 
@@ -87,8 +111,10 @@ else
 end
 
 conf = read_gps_conf
-mobile = !conf['comport'].to_s.empty?
-mobile = true if File.file?("/etc/systemd/system/#{BRIDGE_UNIT}")
+comport = conf['comport'].to_s
+bridge_configured = File.file?("/etc/systemd/system/#{BRIDGE_UNIT}")
+mobile = !comport.empty? || bridge_configured
+using_bridge_pty = comport == RPT_GPS_PTY || comport.empty? && bridge_configured
 
 if conf.empty?
   warn 'Could not parse gps.conf settings'
@@ -99,39 +125,49 @@ else
   puts "  call:     #{conf['call'] || '(unset)'}"
   puts "  server:   #{conf['server'] || '(unset)'}"
   puts "  interval: #{conf['interval'] || '(unset)'}"
-  puts "  comport:  #{conf['comport'] || '(none — fixed mode)'}"
+  puts "  comport:  #{comport.empty? ? '(none — fixed mode)' : comport}"
   puts "  baudrate: #{conf['baudrate'] || '(unset)'}" if conf['baudrate']
 
-  if conf['baudrate'] && conf['baudrate'] != '4800'
-    warn "baudrate is #{conf['baudrate']}; app_gps typically needs 4800 on the NMEA bridge"
+  if !comport.empty? && comport != RPT_GPS_PTY
+    warn "comport is #{comport}; mobile setup via setup-asl3-gps.rb uses #{RPT_GPS_PTY} (gpsd NMEA bridge)"
+    warns += 1
+  end
+
+  if using_bridge_pty && conf['baudrate'] && conf['baudrate'] != APP_GPS_BAUD
+    warn "baudrate is #{conf['baudrate']}; app_gps needs #{APP_GPS_BAUD} on the NMEA bridge (#{RPT_GPS_PTY})"
     warns += 1
   end
 end
 
 puts
 if root
-  gps_status, ok_cmd = asterisk_command("'gps show status'")
-  if !ok_cmd || gps_status.empty?
-    fail "Could not run Asterisk GPS status#{gps_status.empty? ? '' : ": #{gps_status}"}"
+  if asterisk_binary.nil?
+    fail 'asterisk binary not found (expected /usr/sbin/asterisk)'
     issues += 1
   else
-    puts 'Asterisk gps show status:'
-    gps_status.each_line { |line| puts "  #{line.chomp}" }
+    gps_status, ok_cmd = asterisk_command("'gps show status'")
+    if !ok_cmd || gps_status.empty?
+      fail "Could not run Asterisk GPS status#{gps_status.empty? ? '' : ": #{gps_status}"}"
+      issues += 1
+    else
+      puts 'Asterisk gps show status:'
+      gps_status.each_line { |line| puts "  #{line.chomp}" }
 
-    if gps_status.include?('Locked')
-      ok 'GPS locked in Asterisk'
-    elsif gps_status.include?('Unlocked')
-      warn 'GPS serial open but no fix (check sky view / antenna)'
-      warns += 1
-    elsif gps_status.include?('default')
-      ok 'Using fixed default position (expected for fixed-mode nodes)'
+      if gps_status.include?('Locked')
+        ok 'GPS locked in Asterisk'
+      elsif gps_status.include?('Unlocked')
+        warn 'GPS serial open but no fix (check sky view / antenna)'
+        warns += 1
+      elsif gps_status.include?('default')
+        ok 'Using fixed default position (expected for fixed-mode nodes)'
+      end
     end
   end
 else
   puts 'Asterisk gps show status: (skipped — requires root/sudo)'
 end
 
-if mobile || File.file?("/etc/systemd/system/#{BRIDGE_UNIT}")
+if mobile
   puts
   puts 'Mobile / gpsd path:'
 
@@ -159,15 +195,15 @@ if mobile || File.file?("/etc/systemd/system/#{BRIDGE_UNIT}")
       warns += 1
     end
   else
-    warn "#{BRIDGE_UNIT} unit file missing"
-    warns += 1
+    fail "#{BRIDGE_UNIT} unit file missing — re-run: curl .../setup-asl3-gps.rb | sudo ruby (mobile)"
+    issues += 1
   end
 
   if File.executable?(BRIDGE_SCRIPT)
     ok "#{BRIDGE_SCRIPT} installed"
   else
-    warn "#{BRIDGE_SCRIPT} missing or not executable"
-    warns += 1
+    fail "#{BRIDGE_SCRIPT} missing or not executable — re-run setup-asl3-gps.rb mobile setup"
+    issues += 1
   end
 
   if File.file?(ASTERISK_GPS_BRIDGE_DROPIN)
@@ -190,10 +226,10 @@ if mobile || File.file?("/etc/systemd/system/#{BRIDGE_UNIT}")
     issues += 1
   end
 
-  if system('command', '-v', 'cgps', out: File::NULL, err: File::NULL)
+  if File.executable?('/usr/bin/cgps') || File.executable?('/usr/bin/gpspipe')
     puts
-    puts 'cgps -s (one sample):'
-    system('timeout', '3', 'cgps', '-s')
+    puts 'Quick gpsd check (gpspipe -w, one TPV sample):'
+    system('timeout', '3', 'gpspipe', '-w', '-n', '5')
   end
 end
 
