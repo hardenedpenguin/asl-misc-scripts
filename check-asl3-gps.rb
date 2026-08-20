@@ -17,6 +17,8 @@ BRIDGE_UNIT = 'gpsd-nmea-bridge.service'
 BRIDGE_SCRIPT = '/usr/local/sbin/gpsd-nmea-bridge'
 ASTERISK_GPS_BRIDGE_DROPIN = '/etc/systemd/system/asterisk.service.d/gps-bridge.conf'
 APP_GPS_BAUD = '4800'
+SETUP_CURL = 'curl -sSL https://raw.githubusercontent.com/hardenedpenguin/asl-misc-scripts/refs/heads/main/setup-asl3-gps.rb | sudo ruby'
+CHECK_CURL = 'curl -sSL https://raw.githubusercontent.com/hardenedpenguin/asl-misc-scripts/refs/heads/main/check-asl3-gps.rb | sudo ruby'
 
 def ok(msg) = puts "[OK] #{msg}"
 def warn(msg) = puts "[WARN] #{msg}"
@@ -78,7 +80,7 @@ puts
 
 unless root
   warn 'Not running as root — Asterisk CLI checks will be skipped.'
-  puts '      For full results: curl -sSL .../check-asl3-gps.rb | sudo ruby'
+  puts "      For full results: #{CHECK_CURL}"
   puts
 end
 
@@ -88,7 +90,7 @@ unless File.file?('/etc/asterisk/rpt.conf')
 end
 
 unless File.file?(GPS_CONF)
-  fail "#{GPS_CONF} missing — run setup-asl3-gps.rb"
+  fail "#{GPS_CONF} missing — run: #{SETUP_CURL}"
   issues += 1
 else
   ok "#{GPS_CONF} present"
@@ -129,7 +131,8 @@ else
   puts "  baudrate: #{conf['baudrate'] || '(unset)'}" if conf['baudrate']
 
   if !comport.empty? && comport != RPT_GPS_PTY
-    warn "comport is #{comport}; mobile setup via setup-asl3-gps.rb uses #{RPT_GPS_PTY} (gpsd NMEA bridge)"
+    warn "comport is #{comport}; mobile setup uses #{RPT_GPS_PTY} (gpsd NMEA bridge)"
+    puts "      Re-run mobile setup: #{SETUP_CURL}"
     warns += 1
   end
 
@@ -188,21 +191,24 @@ if mobile
 
     unit = File.read("/etc/systemd/system/#{BRIDGE_UNIT}")
     if unit.include?('gpspipe -r |') || unit.include?('ExecStartPre=-/bin/rm -f /dev/rptgps')
-      warn "#{BRIDGE_UNIT} uses the legacy inline gpspipe|socat unit; re-run setup-asl3-gps.rb mobile setup to upgrade"
+      warn "#{BRIDGE_UNIT} uses the legacy inline gpspipe|socat unit; upgrade with mobile setup"
+      puts "      #{SETUP_CURL}"
       warns += 1
     elsif !unit.include?(BRIDGE_SCRIPT)
       warn "#{BRIDGE_UNIT} does not reference #{BRIDGE_SCRIPT}"
       warns += 1
     end
   else
-    fail "#{BRIDGE_UNIT} unit file missing — re-run: curl .../setup-asl3-gps.rb | sudo ruby (mobile)"
+    fail "#{BRIDGE_UNIT} unit file missing"
+    puts "      Re-run mobile setup: #{SETUP_CURL}"
     issues += 1
   end
 
   if File.executable?(BRIDGE_SCRIPT)
     ok "#{BRIDGE_SCRIPT} installed"
   else
-    fail "#{BRIDGE_SCRIPT} missing or not executable — re-run setup-asl3-gps.rb mobile setup"
+    fail "#{BRIDGE_SCRIPT} missing or not executable"
+    puts "      Re-run mobile setup: #{SETUP_CURL}"
     issues += 1
   end
 
@@ -211,11 +217,13 @@ if mobile
     if dropin.include?('Requires=gpsd-nmea-bridge.service') && dropin.include?(RPT_GPS_PTY)
       ok 'Asterisk gps-bridge drop-in waits for /dev/rptgps'
     else
-      warn "#{ASTERISK_GPS_BRIDGE_DROPIN} is present but looks outdated; re-run setup-asl3-gps.rb mobile setup"
+      warn "#{ASTERISK_GPS_BRIDGE_DROPIN} is present but looks outdated"
+      puts "      Re-run mobile setup: #{SETUP_CURL}"
       warns += 1
     end
   else
     warn "#{ASTERISK_GPS_BRIDGE_DROPIN} missing (Asterisk may start before /dev/rptgps exists)"
+    puts "      Re-run mobile setup: #{SETUP_CURL}"
     warns += 1
   end
 

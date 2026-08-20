@@ -230,13 +230,15 @@ Deletes **regular files** under `/var/log` whose modification time is older than
 Preview first:
 
 ```sh
-curl -sSL https://raw.githubusercontent.com/hardenedpenguin/asl-misc-scripts/refs/heads/main/cleanup_old_logs.rb | sudo ruby -- --dry-run
+curl -sSL https://raw.githubusercontent.com/hardenedpenguin/asl-misc-scripts/refs/heads/main/cleanup_old_logs.rb | sudo ruby - --dry-run
 ```
+
+(Ruby needs `-` so the script is read from the pipe and `--dry-run` goes to ARGV. `ruby -- --dry-run` fails looking for a file named `--dry-run`.)
 
 ### fasterAsteriskSounds.sh
 
 ```sh
-curl -sSL https://raw.githubusercontent.com/hardenedpenguin/asl-misc-scripts/refs/heads/main/fasterAsteriskSounds.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/hardenedpenguin/asl-misc-scripts/refs/heads/main/fasterAsteriskSounds.sh | sudo bash -s
 ```
 
 Speeds up stock Asterisk English prompts (default **1.1×** tempo) and writes overrides under `/usr/local/share/asterisk/sounds` so package upgrades of `/usr/share/asterisk/sounds/en` are never overwritten. ASL3 plays these first when `sounds_search_custom_dir = yes` (default).
@@ -261,7 +263,7 @@ curl -sSL https://raw.githubusercontent.com/hardenedpenguin/asl-misc-scripts/ref
 ### write_node_callsigns.sh
 
 ```sh
-curl -sSL https://raw.githubusercontent.com/hardenedpenguin/asl-misc-scripts/refs/heads/main/write_node_callsigns.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/hardenedpenguin/asl-misc-scripts/refs/heads/main/write_node_callsigns.sh | sudo bash -s
 ```
 
 Builds per-node `.gsm` prompts so app_rpt telemetry speaks **callsigns** instead of node numbers (original by N5LSN; parallel/resume updates for ASL3). Reads `astdb.txt` from `/var/lib/asterisk` or `/var/log/asterisk` and writes under `/usr/share/asterisk/sounds/en/rpt/nodenames`.
