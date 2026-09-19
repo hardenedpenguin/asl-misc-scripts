@@ -21,16 +21,17 @@
 #
 # Configures app_gps for APRS-IS beacons on AllStarLink v3.
 # Fixed:  lat/lon/elev only (no gpsd; repeaters, hubs, radioless nodes)
-# Mobile: gpsd + NMEA bridge to /dev/rptgps (shared with saytime, SkywarnPlus, etc.)
+# Mobile: native gpsd via gpsd_host/gpsd_port in gps.conf (shared GPS on :2947)
 
 require 'fileutils'
 
-GPSD_NMEA_BRIDGE_UNIT = '/etc/systemd/system/gpsd-nmea-bridge.service'
-GPSD_NMEA_BRIDGE_SCRIPT = '/usr/local/sbin/gpsd-nmea-bridge'
-ASTERISK_GPS_BRIDGE_DROPIN = '/etc/systemd/system/asterisk.service.d/gps-bridge.conf'
-RPT_GPS_PTY = '/dev/rptgps'
+ASTERISK_GPSD_DROPIN = '/etc/systemd/system/asterisk.service.d/gpsd.conf'
+LEGACY_NMEA_BRIDGE_UNIT = '/etc/systemd/system/gpsd-nmea-bridge.service'
+LEGACY_NMEA_BRIDGE_SCRIPT = '/usr/local/sbin/gpsd-nmea-bridge'
+LEGACY_GPS_BRIDGE_DROPIN = '/etc/systemd/system/asterisk.service.d/gps-bridge.conf'
+GPSD_HOST = '127.0.0.1'
+GPSD_PORT = 2947
 GPSD_USB_BAUD = 115_200
-APP_GPS_BAUD = 4800
 
 MASKED_SECRET = '*****'
 
@@ -335,89 +336,36 @@ def enable_app_gps!(modules_conf)
   puts "[OK] Enabled app_gps.so in #{modules_conf}"
 end
 
-def gpsd_nmea_bridge_script_body
-  # curl | ruby has no sibling files; use the __END__ payload bundled in this script.
-  repo_script = File.expand_path('gpsd-nmea-bridge', File.dirname($PROGRAM_NAME))
-  return File.read(repo_script) if $PROGRAM_NAME != '-' && File.file?(repo_script)
+def remove_legacy_nmea_bridge!
+  had_unit = File.file?(LEGACY_NMEA_BRIDGE_UNIT)
+  had_script = File.exist?(LEGACY_NMEA_BRIDGE_SCRIPT)
+  had_dropin = File.file?(LEGACY_GPS_BRIDGE_DROPIN)
+  return unless had_unit || had_script || had_dropin
 
-  body = DATA.read
-  abort 'ERROR: gpsd-nmea-bridge payload missing from setup-asl3-gps.rb' if body.strip.empty?
-
-  body
+  system('systemctl', 'disable', '--now', 'gpsd-nmea-bridge.service',
+         out: File::NULL, err: File::NULL)
+  FileUtils.rm_f(LEGACY_NMEA_BRIDGE_UNIT)
+  FileUtils.rm_f(LEGACY_NMEA_BRIDGE_SCRIPT)
+  FileUtils.rm_f(LEGACY_GPS_BRIDGE_DROPIN)
+  system('systemctl', 'daemon-reload', out: File::NULL, err: File::NULL)
+  puts '[OK] Removed legacy gpsd-nmea-bridge (/dev/rptgps) pieces'
 end
 
-def install_gpsd_nmea_bridge!
-  FileUtils.mkdir_p(File.dirname(GPSD_NMEA_BRIDGE_SCRIPT))
-  File.write(GPSD_NMEA_BRIDGE_SCRIPT, gpsd_nmea_bridge_script_body)
-  File.chmod(0o755, GPSD_NMEA_BRIDGE_SCRIPT)
-
-  unit = <<~UNIT
+def install_asterisk_after_gpsd!
+  FileUtils.mkdir_p(File.dirname(ASTERISK_GPSD_DROPIN))
+  File.write(ASTERISK_GPSD_DROPIN, <<~DROPIN)
     [Unit]
-    Description=Replay gpsd NMEA to #{RPT_GPS_PTY} for app_gps
-    Documentation=man:gpspipe(1) man:socat(1)
     After=gpsd.service
-    Requires=gpsd.service
-    PartOf=gpsd.service
-
-    [Service]
-    Type=simple
-    RuntimeDirectory=gpsd-nmea-bridge
-    RuntimeDirectoryMode=0755
-    Restart=always
-    RestartSec=1
-    ExecStart=#{GPSD_NMEA_BRIDGE_SCRIPT}
-    ExecStartPost=/bin/bash -c 'for i in $(seq 1 50); do [ -e #{RPT_GPS_PTY} ] && exit 0; sleep 0.1; done; echo "timed out waiting for #{RPT_GPS_PTY}"; exit 1'
-
-    [Install]
-    WantedBy=multi-user.target
-  UNIT
-
-  File.write(GPSD_NMEA_BRIDGE_UNIT, unit)
-  run!('systemctl', 'daemon-reload')
-  run!('systemctl', 'enable', 'gpsd-nmea-bridge.service')
-  run!('systemctl', 'restart', 'gpsd-nmea-bridge.service')
-  puts "[OK] Installed gpsd NMEA bridge -> #{RPT_GPS_PTY} via #{GPSD_NMEA_BRIDGE_SCRIPT}"
-end
-
-def install_asterisk_after_gps_bridge!
-  FileUtils.mkdir_p(File.dirname(ASTERISK_GPS_BRIDGE_DROPIN))
-  File.write(ASTERISK_GPS_BRIDGE_DROPIN, <<~DROPIN)
-    [Unit]
-    After=gpsd-nmea-bridge.service
-    Requires=gpsd-nmea-bridge.service
-
-    [Service]
-    ExecStartPre=/bin/bash -c 'for i in $(seq 1 30); do [ -e #{RPT_GPS_PTY} ] && exit 0; sleep 1; done; echo "asterisk: #{RPT_GPS_PTY} not ready"; exit 1'
+    Wants=gpsd.service
   DROPIN
   run!('systemctl', 'daemon-reload')
-  puts '[OK] Asterisk will wait for gpsd NMEA bridge before starting.'
-end
-
-def wait_for_rptgps!(timeout_sec: 15)
-  timeout_sec.times do
-    return if File.exist?(RPT_GPS_PTY)
-
-    sleep 1
-  end
-  abort "ERROR: #{RPT_GPS_PTY} did not appear; check: systemctl status gpsd-nmea-bridge.service"
-end
-
-def ensure_asterisk_dialout!
-  return unless File.exist?('/etc/passwd')
-
-  dialout = File.read('/etc/group').lines.find { |l| l.start_with?('dialout:') }
-  return unless dialout
-
-  members = dialout.split(':').fetch(3, '').split(',')
-  return if members.include?('asterisk')
-
-  system('usermod', '-aG', 'dialout', 'asterisk')
-  puts '[OK] Added user asterisk to group dialout (for APRS GPS PTY)'
+  puts '[OK] Asterisk will start after gpsd.service'
 end
 
 def setup_mobile_gps!(gps_device)
-  # Bridge path needs: gpsd (daemon), gpsd-clients (gpspipe), socat (PTY).
-  ensure_packages!('gpsd', 'gpsd-clients', 'socat')
+  # Native app_gps gpsd support: daemon + clients only (no socat / PTY bridge).
+  ensure_packages!('gpsd', 'gpsd-clients')
+  remove_legacy_nmea_bridge!
 
   puts "\n--- Writing /etc/default/gpsd ---"
   File.write('/etc/default/gpsd', <<~GPSD)
@@ -433,13 +381,9 @@ def setup_mobile_gps!(gps_device)
     run!('systemctl', 'enable', 'gpsd.service')
   end
   run!('systemctl', 'restart', 'gpsd.service')
-  puts '[OK] gpsd enabled (shared GPS on 127.0.0.1:2947).'
+  puts "[OK] gpsd enabled (shared GPS on #{GPSD_HOST}:#{GPSD_PORT})."
 
-  puts "\n--- APRS NMEA bridge (gpsd -> app_gps) ---"
-  ensure_asterisk_dialout!
-  install_gpsd_nmea_bridge!
-  install_asterisk_after_gps_bridge!
-  wait_for_rptgps!
+  install_asterisk_after_gpsd!
 end
 
 def build_gps_conf(config)
@@ -448,9 +392,9 @@ def build_gps_conf(config)
   lines << "; Mode: #{config[:mode]}"
   if config[:mobile]
     if config[:radioless]
-      lines << "; Mobile radioless: live GPS via #{RPT_GPS_PTY} (gpsd-nmea-bridge.service)"
+      lines << "; Mobile radioless: live GPS via native gpsd (#{GPSD_HOST}:#{GPSD_PORT})"
     else
-      lines << "; Mobile: NMEA from gpsd via #{RPT_GPS_PTY} (gpsd-nmea-bridge.service)"
+      lines << "; Mobile: live GPS via native gpsd (#{GPSD_HOST}:#{GPSD_PORT})"
     end
   elsif config[:radioless]
     lines << '; Fixed radioless: no GPS device; position from lat/lon below'
@@ -497,9 +441,9 @@ def build_gps_conf(config)
   lines << ''
 
   if config[:mobile]
-    lines << '; GPS serial (NMEA bridge from gpsd)'
-    lines << "comport = #{RPT_GPS_PTY}"
-    lines << "baudrate = #{APP_GPS_BAUD}"
+    lines << '; Native gpsd (if gpsd_host is set, comport is ignored)'
+    lines << "gpsd_host = #{GPSD_HOST}"
+    lines << "gpsd_port = #{GPSD_PORT}"
   end
 
   lines << ''
@@ -541,7 +485,7 @@ def print_config_summary(config)
   puts "  dir    = #{config[:dir]}  =>  #{phg_dir_label(config[:dir])}"
   puts
   if config[:mobile]
-    puts "GPS:            gpsd on 127.0.0.1:2947, NMEA bridge -> #{RPT_GPS_PTY}"
+    puts "GPS:            native gpsd at #{GPSD_HOST}:#{GPSD_PORT}"
   else
     puts 'GPS:            none (fixed position only)'
   end
@@ -557,23 +501,21 @@ def hint_saytime_gpsd!
 
   puts "\nNote: saytime_weather_rb — add to #{weather_ini} under [weather] for GPS location:"
   puts '    location_source = gps'
-  puts '    gpsd_host = 127.0.0.1'
-  puts '    gpsd_port = 2947'
+  puts "    gpsd_host = #{GPSD_HOST}"
+  puts "    gpsd_port = #{GPSD_PORT}"
 end
 
 def verify_installation!(mobile:)
   notes = []
   if mobile
-    notes << 'gpsd-nmea-bridge.service is not active' unless system('systemctl', 'is-active', '--quiet', 'gpsd-nmea-bridge.service')
     notes << 'gpsd.service is not active' unless system('systemctl', 'is-active', '--quiet', 'gpsd.service')
-    notes << "#{RPT_GPS_PTY} is missing" unless File.exist?(RPT_GPS_PTY)
   end
 
   gps_status = `#{asterisk_binary} -rx 'gps show status' 2>/dev/null`
   if gps_status.include?('Locked')
     puts '[OK] Post-install: GPS locked in Asterisk.'
   elsif mobile && gps_status.include?('Unlocked')
-    notes << 'GPS serial open but no fix yet (allow time for satellite lock and clear sky)'
+    notes << 'GPS open via gpsd but no fix yet (allow time for satellite lock and clear sky)'
   elsif !mobile && gps_status.include?('default')
     puts '[OK] Post-install: using fixed default position (no GPS device).'
   end
@@ -608,7 +550,7 @@ mobile = mode_key == 'mobile'
 preset = PRESETS.fetch(mode_key)
 
 puts
-puts "Selected: #{mode_key} (#{mobile ? 'live GPS via gpsd' : 'fixed lat/lon, no GPS hardware'})"
+puts "Selected: #{mode_key} (#{mobile ? "live GPS via native gpsd at #{GPSD_HOST}:#{GPSD_PORT}" : 'fixed lat/lon, no GPS hardware'})"
 
 base_callsign = ask(input, 'Enter your FCC callsign (e.g., W5GLE)').upcase
 abort 'ERROR: Callsign cannot be blank.' if base_callsign.empty?
@@ -723,6 +665,7 @@ end
 input.close unless input.equal?($stdin)
 
 setup_mobile_gps!(gps_device) if mobile
+remove_legacy_nmea_bridge! unless mobile
 
 gps_conf = '/etc/asterisk/gps.conf'
 if File.exist?(gps_conf)
@@ -744,68 +687,16 @@ puts "\n===================================================="
 puts 'Configuration complete!'
 puts '===================================================='
 if mobile
-  puts 'Shared GPS: gpsd on 127.0.0.1:2947 (saytime_weather_rb, SkywarnPlus-NG, cgps)'
-  puts "APRS: app_gps reads NMEA from #{RPT_GPS_PTY}"
+  puts "Shared GPS: gpsd on #{GPSD_HOST}:#{GPSD_PORT} (saytime_weather_rb, SkywarnPlus-NG, cgps)"
+  puts 'APRS: app_gps uses native gpsd_host / gpsd_port'
   puts ''
   puts '1. Check gpsd:     cgps -s'
-  puts "2. Check bridge:   ls -l #{RPT_GPS_PTY}"
-  puts '3. Asterisk CLI:   gps show status'
+  puts '2. Asterisk CLI:   gps show status'
 else
   puts 'Fixed APRS: position from lat/lon in gps.conf (no GPS hardware)'
-  puts '3. Asterisk CLI:   gps show status  (shows default position)'
+  puts '2. Asterisk CLI:   gps show status  (shows default position)'
 end
-puts "4. Map: https://aprs.fi/#!call=#{full_callsign}"
+puts "3. Map: https://aprs.fi/#!call=#{full_callsign}"
 puts '   (Allow a few minutes for the first beacon.)'
 puts '===================================================='
 
-__END__
-#!/bin/bash
-# Replay gpsd NMEA to /dev/rptgps for app_gps.
-#
-# Copyright (C) 2026 Jory A. Pratt, W5GLE <geekypenguin@gmail.com>
-#
-# This program is free software; you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation; either version 2 of the License, or
-# (at your option) any later version.
-#
-# Decouple gpspipe from socat so a dropped PTY reader does not tear down the
-# whole bridge, and recreate /dev/rptgps quickly when socat must restart.
-set -euo pipefail
-
-RUNDIR=/run/gpsd-nmea-bridge
-FIFO="${RUNDIR}/nmea.pipe"
-PTYLINK=/dev/rptgps
-
-install -d -m 0755 "$RUNDIR"
-rm -f "$FIFO"
-mkfifo -m 0660 "$FIFO"
-chgrp dialout "$FIFO" 2>/dev/null || true
-
-cleanup() {
-	local pids
-
-	pids=$(jobs -p 2>/dev/null || true)
-	if [ -n "${pids}" ]; then
-		kill ${pids} 2>/dev/null || true
-	fi
-	wait 2>/dev/null || true
-}
-trap cleanup EXIT INT TERM
-
-# Keep feeding NMEA even if the PTY bridge restarts.
-(
-	while true; do
-		gpspipe -r 2>/dev/null >"${FIFO}" || true
-		sleep 1
-	done
-) &
-
-while true; do
-	rm -f "${PTYLINK}"
-	socat \
-		"OPEN:${FIFO},ignoreeof" \
-		"PTY,link=${PTYLINK},raw,echo=0,group=dialout,mode=660,waitslave" \
-		|| true
-	sleep 0.2
-done

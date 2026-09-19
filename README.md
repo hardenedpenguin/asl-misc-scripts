@@ -15,8 +15,7 @@ Run directly from GitHub with curl. Copy the line for the script you need.
 | Script | Root | ASL3 | Experimental | Notes |
 |--------|------|------|--------------|-------|
 | `asl-debian-setup.sh` | yes | — | no | Debian 12/13 repo + optional install |
-| `setup-asl3-gps.rb` | yes | yes | no | Interactive APRS setup |
-| `gpsd-nmea-bridge` | — | yes | no | Installed to `/usr/local/sbin` by setup script |
+| `setup-asl3-gps.rb` | yes | yes | no | Interactive APRS setup (native gpsd for mobile) |
 | `check-asl3-gps.rb` | yes | yes | no | Read-only APRS/GPS diagnostic |
 | `setup-asl3-tlb.rb` | yes | yes | **yes** | TheLinkBox / chan_tlb |
 | `setup-44connect-forward.rb` | yes | yes | **yes** | 44Net firewalld forwards |
@@ -52,9 +51,9 @@ Interactive setup for **APRS-IS position beacons** on an ASL3 node via Asterisk 
 | Mode | GPS hardware | gpsd installed? | Position source |
 |------|--------------|-----------------|-----------------|
 | **Fixed** | No | No | Fixed `lat` / `lon` / `elev` in `gps.conf` |
-| **Mobile** | USB dongle | Yes (if not already) | Live GPS via gpsd; fallback lat/lon when unlocked |
+| **Mobile** | USB dongle | Yes (if not already) | Live GPS via native `gpsd_host` / `gpsd_port`; fallback lat/lon when unlocked |
 
-Both modes support **radioless** nodes (hubs, links, GPS-only trackers): skip RF frequency and tone, set `freq = 0.0` / `tone = 0.0`, and use a plain map comment. Mobile + radioless still installs gpsd and the NMEA bridge so APRS tracks the dongle without pretending the node has RF.
+Both modes support **radioless** nodes (hubs, links, GPS-only trackers): skip RF frequency and tone, set `freq = 0.0` / `tone = 0.0`, and use a plain map comment. Mobile + radioless still installs gpsd so APRS tracks the dongle without pretending the node has RF.
 
 #### What the script configures
 
@@ -66,13 +65,12 @@ Both modes support **radioless** nodes (hubs, links, GPS-only trackers): skip RF
 
 **Mobile only:**
 
-- Installs `gpsd`, `gpsd-clients`, and `socat` if missing
+- Installs `gpsd` and `gpsd-clients` if missing
 - `/etc/default/gpsd` — USB device (default `/dev/ttyACM0`)
-- `/usr/local/sbin/gpsd-nmea-bridge` — bridge helper (written by the setup script; also kept as a repo file for review)
-- `gpsd-nmea-bridge.service` — replays NMEA to `/dev/rptgps` (because `app_gps` reads a serial stream, not gpsd directly)
-- Asterisk waits for `/dev/rptgps` before starting, avoiding transient `Cannot open serial port` log spam on restart
+- `gps.conf` uses native `gpsd_host = 127.0.0.1` / `gpsd_port = 2947` (no `comport` / NMEA PTY bridge)
+- Asterisk systemd drop-in so the node starts after `gpsd.service`
 - Shared GPS on `127.0.0.1:2947` for saytime, SkywarnPlus-NG, `cgps`, and similar clients
-- Adds `asterisk` to group `dialout` if needed; Asterisk starts after the bridge on boot
+- Removes any legacy `gpsd-nmea-bridge` / `/dev/rptgps` pieces if present
 
 **Not changed:** `rpt.conf` (APRSStt is separate; not required for standard beacons).
 
@@ -98,7 +96,7 @@ Both modes support **radioless** nodes (hubs, links, GPS-only trackers): skip RF
 asterisk -rx 'gps show status'
 ```
 
-Mobile: `cgps -s` and `ls -l /dev/rptgps`. Map: `https://aprs.fi/#!call=YOURCALL-SSID`
+Mobile: `cgps -s`. Map: `https://aprs.fi/#!call=YOURCALL-SSID`
 
 ### check-asl3-gps.rb
 
@@ -106,7 +104,7 @@ Mobile: `cgps -s` and `ls -l /dev/rptgps`. Map: `https://aprs.fi/#!call=YOURCALL
 curl -sSL https://raw.githubusercontent.com/hardenedpenguin/asl-misc-scripts/refs/heads/main/check-asl3-gps.rb | sudo ruby
 ```
 
-Read-only diagnostic for APRS/GPS on an ASL3 node: `gps.conf`, `app_gps` module state, `gps show status`, and (when configured) gpsd, the NMEA bridge, and `/dev/rptgps`. Requires **root** (`sudo ruby`) to query the Asterisk CLI. Exits non-zero if critical issues are found. Safe to run anytime; does not change configuration.
+Read-only diagnostic for APRS/GPS on an ASL3 node: `gps.conf`, `app_gps` module state, `gps show status`, and (when configured) native gpsd settings. Warns if legacy `/dev/rptgps` bridge pieces remain. Requires **root** (`sudo ruby`) to query the Asterisk CLI. Exits non-zero if critical issues are found. Safe to run anytime; does not change configuration.
 
 ### setup-asl3-tlb.rb
 

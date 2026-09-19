@@ -12,11 +12,11 @@
 
 GPS_CONF = '/etc/asterisk/gps.conf'
 MODULES_CONF = '/etc/asterisk/modules.conf'
+LEGACY_BRIDGE_UNIT = 'gpsd-nmea-bridge.service'
+LEGACY_BRIDGE_SCRIPT = '/usr/local/sbin/gpsd-nmea-bridge'
+LEGACY_GPS_BRIDGE_DROPIN = '/etc/systemd/system/asterisk.service.d/gps-bridge.conf'
+ASTERISK_GPSD_DROPIN = '/etc/systemd/system/asterisk.service.d/gpsd.conf'
 RPT_GPS_PTY = '/dev/rptgps'
-BRIDGE_UNIT = 'gpsd-nmea-bridge.service'
-BRIDGE_SCRIPT = '/usr/local/sbin/gpsd-nmea-bridge'
-ASTERISK_GPS_BRIDGE_DROPIN = '/etc/systemd/system/asterisk.service.d/gps-bridge.conf'
-APP_GPS_BAUD = '4800'
 SETUP_CURL = 'curl -sSL https://raw.githubusercontent.com/hardenedpenguin/asl-misc-scripts/refs/heads/main/setup-asl3-gps.rb | sudo ruby'
 CHECK_CURL = 'curl -sSL https://raw.githubusercontent.com/hardenedpenguin/asl-misc-scripts/refs/heads/main/check-asl3-gps.rb | sudo ruby'
 
@@ -113,10 +113,13 @@ else
 end
 
 conf = read_gps_conf
+gpsd_host = conf['gpsd_host'].to_s
+gpsd_port = conf['gpsd_port'].to_s
 comport = conf['comport'].to_s
-bridge_configured = File.file?("/etc/systemd/system/#{BRIDGE_UNIT}")
-mobile = !comport.empty? || bridge_configured
-using_bridge_pty = comport == RPT_GPS_PTY || comport.empty? && bridge_configured
+legacy_bridge = File.file?("/etc/systemd/system/#{LEGACY_BRIDGE_UNIT}") ||
+                File.executable?(LEGACY_BRIDGE_SCRIPT) ||
+                File.exist?(RPT_GPS_PTY)
+mobile = !gpsd_host.empty? || !comport.empty? || legacy_bridge
 
 if conf.empty?
   warn 'Could not parse gps.conf settings'
@@ -124,20 +127,26 @@ if conf.empty?
 else
   puts
   puts 'gps.conf:'
-  puts "  call:     #{conf['call'] || '(unset)'}"
-  puts "  server:   #{conf['server'] || '(unset)'}"
-  puts "  interval: #{conf['interval'] || '(unset)'}"
-  puts "  comport:  #{comport.empty? ? '(none — fixed mode)' : comport}"
-  puts "  baudrate: #{conf['baudrate'] || '(unset)'}" if conf['baudrate']
+  puts "  call:      #{conf['call'] || '(unset)'}"
+  puts "  server:    #{conf['server'] || '(unset)'}"
+  puts "  interval:  #{conf['interval'] || '(unset)'}"
+  if gpsd_host.empty?
+    puts '  gpsd_host: (none — fixed mode or legacy serial)'
+  else
+    puts "  gpsd_host: #{gpsd_host}"
+    puts "  gpsd_port: #{gpsd_port.empty? ? '2947 (default)' : gpsd_port}"
+  end
+  puts "  comport:   #{comport}" unless comport.empty?
+  puts "  baudrate:  #{conf['baudrate']}" if conf['baudrate']
 
-  if !comport.empty? && comport != RPT_GPS_PTY
-    warn "comport is #{comport}; mobile setup uses #{RPT_GPS_PTY} (gpsd NMEA bridge)"
-    puts "      Re-run mobile setup: #{SETUP_CURL}"
+  if !gpsd_host.empty? && !comport.empty?
+    warn 'both gpsd_host and comport are set; Asterisk ignores comport when gpsd_host is present'
     warns += 1
   end
 
-  if using_bridge_pty && conf['baudrate'] && conf['baudrate'] != APP_GPS_BAUD
-    warn "baudrate is #{conf['baudrate']}; app_gps needs #{APP_GPS_BAUD} on the NMEA bridge (#{RPT_GPS_PTY})"
+  if gpsd_host.empty? && !comport.empty?
+    warn "comport=#{comport} is the legacy serial path; mobile setup now uses native gpsd_host"
+    puts "      Re-run mobile setup: #{SETUP_CURL}"
     warns += 1
   end
 end
@@ -159,7 +168,7 @@ if root
       if gps_status.include?('Locked')
         ok 'GPS locked in Asterisk'
       elsif gps_status.include?('Unlocked')
-        warn 'GPS serial open but no fix (check sky view / antenna)'
+        warn 'GPS connected but no fix (check sky view / antenna / gpsd)'
         warns += 1
       elsif gps_status.include?('default')
         ok 'Using fixed default position (expected for fixed-mode nodes)'
@@ -181,57 +190,35 @@ if mobile
     issues += 1
   end
 
-  if File.file?("/etc/systemd/system/#{BRIDGE_UNIT}")
-    if service_active?(BRIDGE_UNIT)
-      ok "#{BRIDGE_UNIT} active"
-    else
-      fail "#{BRIDGE_UNIT} not active (check: systemctl status #{BRIDGE_UNIT})"
-      issues += 1
-    end
-
-    unit = File.read("/etc/systemd/system/#{BRIDGE_UNIT}")
-    if unit.include?('gpspipe -r |') || unit.include?('ExecStartPre=-/bin/rm -f /dev/rptgps')
-      warn "#{BRIDGE_UNIT} uses the legacy inline gpspipe|socat unit; upgrade with mobile setup"
-      puts "      #{SETUP_CURL}"
-      warns += 1
-    elsif !unit.include?(BRIDGE_SCRIPT)
-      warn "#{BRIDGE_UNIT} does not reference #{BRIDGE_SCRIPT}"
-      warns += 1
-    end
-  else
-    fail "#{BRIDGE_UNIT} unit file missing"
+  if gpsd_host.empty?
+    fail 'gpsd_host missing from gps.conf (required for native gpsd mobile mode)'
     puts "      Re-run mobile setup: #{SETUP_CURL}"
     issues += 1
-  end
-
-  if File.executable?(BRIDGE_SCRIPT)
-    ok "#{BRIDGE_SCRIPT} installed"
+  elsif gpsd_host != '127.0.0.1' && gpsd_host != 'localhost'
+    warn "gpsd_host is #{gpsd_host} (setup defaults to 127.0.0.1)"
+    warns += 1
   else
-    fail "#{BRIDGE_SCRIPT} missing or not executable"
-    puts "      Re-run mobile setup: #{SETUP_CURL}"
-    issues += 1
+    ok "gpsd_host=#{gpsd_host}"
   end
 
-  if File.file?(ASTERISK_GPS_BRIDGE_DROPIN)
-    dropin = File.read(ASTERISK_GPS_BRIDGE_DROPIN)
-    if dropin.include?('Requires=gpsd-nmea-bridge.service') && dropin.include?(RPT_GPS_PTY)
-      ok 'Asterisk gps-bridge drop-in waits for /dev/rptgps'
+  if File.file?(ASTERISK_GPSD_DROPIN)
+    dropin = File.read(ASTERISK_GPSD_DROPIN)
+    if dropin.include?('gpsd.service')
+      ok 'Asterisk gpsd drop-in present'
     else
-      warn "#{ASTERISK_GPS_BRIDGE_DROPIN} is present but looks outdated"
-      puts "      Re-run mobile setup: #{SETUP_CURL}"
+      warn "#{ASTERISK_GPSD_DROPIN} is present but does not reference gpsd.service"
       warns += 1
     end
   else
-    warn "#{ASTERISK_GPS_BRIDGE_DROPIN} missing (Asterisk may start before /dev/rptgps exists)"
+    warn "#{ASTERISK_GPSD_DROPIN} missing (Asterisk may start before gpsd)"
     puts "      Re-run mobile setup: #{SETUP_CURL}"
     warns += 1
   end
 
-  if File.exist?(RPT_GPS_PTY)
-    ok "#{RPT_GPS_PTY} exists"
-  else
-    fail "#{RPT_GPS_PTY} missing"
-    issues += 1
+  if legacy_bridge || File.file?(LEGACY_GPS_BRIDGE_DROPIN)
+    warn 'Legacy NMEA bridge pieces still present (/dev/rptgps path)'
+    puts "      Re-run mobile setup to remove them: #{SETUP_CURL}"
+    warns += 1
   end
 
   if File.executable?('/usr/bin/cgps') || File.executable?('/usr/bin/gpspipe')
